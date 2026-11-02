@@ -26,7 +26,7 @@ docker compose up -d --build
 このサービスは「他人が書いたコードを自分のサーバーで実行する」ものです。
 
 1. **専用VMで動かす**(Bitwarden 等が同居する DockerV は避ける)
-2. `scripts/egress-firewall.sh` を適用して、開発コンテナから社内LAN (`10.0.0.0/8` など) への通信を遮断し、適用後に表示される確認コマンドで検証する(**このスクリプトは未検証**)
+2. `scripts/egress-firewall.sh` を適用して、開発コンテナから社内LAN (`10.0.0.0/8` など) と VM 本体への通信を遮断し、適用後に表示される確認コマンドで検証する。再起動後も残すには `scripts/devbox-egress.service` を入れる(手順はファイルの先頭に記載)。あわせて Proxmox の VM ファイアウォール(net0 の Firewall にチェック)でも `10.0.0.0/8` 宛てを OUT で DROP にしておくと二重になる
 3. 管理画面 (`DEVBOX_HOST`) を Cloudflare Access で保護する
 4. 可能なら gVisor (`DOCKER_RUNTIME=runsc`) を導入
 5. 現状は管理トークン1つだけの認証。不特定多数に開く前に、ユーザー別ログイン・クォータ・アイドル自動停止が必要

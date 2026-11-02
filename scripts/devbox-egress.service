@@ -1,0 +1,23 @@
+# egress-firewall.sh を、起動時と Docker 再起動時に自動適用する systemd ユニット。
+#
+# 入れ方 (VM で):
+#   sudo install -m 0755 -o root -g root scripts/egress-firewall.sh /usr/local/sbin/devbox-egress-firewall.sh
+#   sudo install -m 0644 scripts/devbox-egress.service /etc/systemd/system/devbox-egress.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now devbox-egress.service
+#
+# スクリプトを更新したら、もう一度 install してから: sudo systemctl restart devbox-egress.service
+[Unit]
+Description=devbox: block user containers from private networks
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=60
+ExecStartPre=/bin/sh -c 'until iptables -S DOCKER-USER >/dev/null 2>&1; do sleep 1; done'
+ExecStart=/usr/local/sbin/devbox-egress-firewall.sh
+
+[Install]
+WantedBy=multi-user.target docker.service
