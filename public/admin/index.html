@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>devbox 管理</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --line: #2b3040;
+    --text: #e8eaf0; --muted: #8b93a7;
+    --purple: #a78bfa; --blue: #60a5fa; --cyan: #22d3ee; --green: #4ade80;
+    --orange: #fb923c; --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; line-height: 1.5; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 20px;
+    background: linear-gradient(90deg, var(--orange), var(--purple), var(--cyan));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  h2 { margin: 0 0 10px; font-size: 15px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; overflow-x: auto; }
+  .card.alert { border-color: var(--orange); }
+  input { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 8px; font: inherit; }
+  input.num { width: 72px; }
+  input:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 5px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+  button:hover { border-color: var(--blue); }
+  button.ok { border-color: var(--green); color: var(--green); }
+  button.danger:hover { border-color: var(--red); color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  td.wrap { white-space: normal; word-break: break-all; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; }
+  .st-approved, .st-running { color: var(--green); } .st-pending, .st-building { color: var(--orange); }
+  .st-suspended, .st-failed { color: var(--red); } .st-stopped, .st-created { color: var(--muted); }
+  .st-queued { color: var(--purple); }
+  .who { display: inline-flex; align-items: center; gap: 8px; }
+  .who img { width: 22px; height: 22px; border-radius: 50%; }
+  a { color: var(--cyan); text-decoration: none; } a:hover { text-decoration: underline; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .err { color: var(--red); font-size: 13px; margin-top: 8px; }
+  @media (max-width: 640px) { header, main { padding: 14px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>devbox 管理</h1>
+  <div class="row"><span class="muted" id="info"></span><button id="logout" hidden>ログアウト</button></div>
+</header>
+<main>
+  <section class="card" id="login" hidden>
+    <h2>管理トークンを入力</h2>
+    <div class="row">
+      <input id="token" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" style="min-width:280px">
+      <button class="ok" id="login-btn">ログイン</button>
+    </div>
+    <div class="err" id="login-err"></div>
+  </section>
+
+  <section class="card alert" id="pending-box" hidden>
+    <h2>承認待ちの利用者</h2>
+    <div id="pending"></div>
+  </section>
+
+  <section class="card" id="users-box" hidden>
+    <h2>利用者</h2>
+    <table>
+      <thead><tr><th>GitHub</th><th>状態</th><th>使用中</th><th>プロジェクト上限</th><th>同時起動上限</th><th></th><th>最終ログイン</th></tr></thead>
+      <tbody id="users"></tbody>
+    </table>
+    <div class="muted" style="margin-top:8px">上限の欄を空にして保存すると、既定値に戻ります。</div>
+  </section>
+
+  <section class="card" id="projects-box" hidden>
+    <h2>すべてのプロジェクト</h2>
+    <table>
+      <thead><tr><th>持ち主</th><th>名前</th><th>リポジトリ</th><th>状態</th><th>プレビュー</th><th></th></tr></thead>
+      <tbody id="projects"></tbody>
+    </table>
+  </section>
+  <div class="err" id="err"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = sessionStorage.getItem('devbox_admin_token') || '';
+let timer = null;
+let defaults = { maxProjects: 3, maxRunning: 1 };
+
+// 外部由来の文字列(GitHub のユーザー名など)を扱うので、innerHTML は使わず、必ず textContent で入れる
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api/admin' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (res.status === 401) { showLogin('トークンが正しくありません'); throw new Error('unauthorized'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function showLogin(msg = '') {
+  clearTimeout(timer);
+  $('login').hidden = false; $('logout').hidden = true;
+  for (const id of ['pending-box', 'users-box', 'projects-box']) $(id).hidden = true;
+  $('login-err').textContent = msg;
+}
+
+const fmt = (s) => (s ? new Date(s).toLocaleString('ja-JP') : '—');
+const stateLabel = { approved: '承認済み', pending: '承認待ち', suspended: '凍結', created: '未起動', queued: '待機中',
+  building: 'ビルド中', running: '実行中', stopped: '停止', failed: '失敗' };
+const badge = (s) => el('span', { class: 'badge st-' + s }, stateLabel[s] || s);
+
+function who(u) {
+  return el('span', { class: 'who' },
+    u.avatarUrl ? el('img', { src: u.avatarUrl, alt: '' }) : '',
+    el('a', { href: 'https://github.com/' + encodeURIComponent(u.login), target: '_blank', rel: 'noopener noreferrer' }, u.login));
+}
+
+async function act(fn) {
+  $('err').textContent = '';
+  try { await fn(); } catch (e) { if (e.message !== 'unauthorized') $('err').textContent = e.message; }
+  await refresh();
+}
+
+const setStatus = (u, status) => act(() => api(`/users/${u.id}`, { method: 'PATCH', body: { status } }));
+
+function renderPending(users) {
+  const list = users.filter((u) => u.status === 'pending');
+  $('pending-box').hidden = list.length === 0;
+  $('pending').replaceChildren(...list.map((u) =>
+    el('div', { class: 'row', style: 'padding:6px 0' },
+      who(u), el('span', { class: 'muted' }, '登録: ' + fmt(u.createdAt)),
+      el('button', { class: 'ok', onclick: () => setStatus(u, 'approved') }, '承認'),
+      el('button', { class: 'danger', onclick: () => { if (confirm(`${u.login} を拒否(凍結)しますか？`)) setStatus(u, 'suspended'); } }, '拒否'))));
+}
+
+function renderUsers(users) {
+  $('users').replaceChildren(...users.map((u) => {
+    const mp = el('input', { class: 'num', type: 'number', min: 0, max: 100, value: u.maxProjectsSetting ?? '', placeholder: `既定 ${defaults.maxProjects}` });
+    const mr = el('input', { class: 'num', type: 'number', min: 0, max: 20, value: u.maxRunningSetting ?? '', placeholder: `既定 ${defaults.maxRunning}` });
+    const toNum = (i) => (i.value === '' ? null : Number(i.value));
+    return el('tr', {},
+      el('td', {}, who(u)),
+      el('td', {}, badge(u.status)),
+      el('td', {}, `${u.usage.projects} 件 / 起動 ${u.usage.running}`),
+      el('td', {}, mp), el('td', {}, mr),
+      el('td', {},
+        el('div', { class: 'row' },
+          el('button', { onclick: () => act(() => api(`/users/${u.id}`, { method: 'PATCH', body: { maxProjects: toNum(mp), maxRunning: toNum(mr) } })) }, '上限を保存'),
+          u.status !== 'approved' ? el('button', { class: 'ok', onclick: () => setStatus(u, 'approved') }, '承認') : '',
+          u.status !== 'suspended' ? el('button', { class: 'danger', onclick: () => { if (confirm(`${u.login} を凍結しますか？動いているものは止まり、ログインも無効になります。`)) setStatus(u, 'suspended'); } }, '凍結') : '')),
+      el('td', { class: 'muted' }, fmt(u.lastLoginAt)));
+  }));
+}
+
+function renderProjects(projects) {
+  $('projects').replaceChildren(...projects.map((p) =>
+    el('tr', {},
+      el('td', {}, p.owner ?? '(なし)'),
+      el('td', {}, p.name),
+      el('td', { class: 'wrap' }, `${p.repoUrl} @ ${p.branch}`),
+      el('td', {}, badge(p.status)),
+      el('td', {}, p.status === 'running' ? el('a', { href: p.previewUrl, target: '_blank', rel: 'noopener noreferrer' }, p.previewUrl.replace(/^https?:\/\//, '')) : ''),
+      el('td', {}, el('div', { class: 'row' },
+        el('button', { disabled: !(p.status === 'running' || p.status === 'queued') || p.busy, onclick: () => act(() => api(`/projects/${p.id}/stop`, { method: 'POST' })) }, '停止'),
+        el('button', { class: 'danger', disabled: p.busy, onclick: () => { if (confirm(`「${p.name}」(${p.owner ?? '持ち主なし'}) を削除しますか？`)) act(() => api(`/projects/${p.id}`, { method: 'DELETE' })); } }, '削除'))))));
+}
+
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    const [info, users, projects] = await Promise.all([api('/info'), api('/users'), api('/projects')]);
+    defaults = info.defaults;
+    $('login').hidden = true; $('logout').hidden = false;
+    $('users-box').hidden = false; $('projects-box').hidden = false;
+    $('info').textContent =
+      `稼働 ${info.active}/${info.maxRunning} ・ 承認待ち ${info.users.pending} ・ DNS自動作成 ${info.dnsAutomation ? '有効' : '無効'}` +
+      (info.githubLogin ? '' : ' ・ ⚠ GitHubログイン未設定');
+    // 上限を入力している途中は、利用者の表を作り直さない(入力が消えてしまうため)
+    const editing = document.activeElement?.tagName === 'INPUT' && $('users').contains(document.activeElement);
+    renderPending(users);
+    if (!editing) renderUsers(users);
+    renderProjects(projects);
+  } catch (e) {
+    if (e.message !== 'unauthorized') $('err').textContent = e.message;
+    else return;
+  }
+  timer = setTimeout(refresh, 6000);
+}
+
+$('login-btn').onclick = () => { token = $('token').value.trim(); sessionStorage.setItem('devbox_admin_token', token); $('token').value = ''; refresh(); };
+$('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('login-btn').click(); });
+$('logout').onclick = () => { sessionStorage.removeItem('devbox_admin_token'); token = ''; location.reload(); };
+
+if (token) refresh(); else showLogin();
+</script>
+</body>
+</html>

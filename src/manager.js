@@ -5,7 +5,7 @@ import Docker from 'dockerode';
 import tar from 'tar-fs';
 import { config } from './config.js';
 import { decryptJson } from './crypto.js';
-import { getProject, updateProject, listProjects } from './db.js';
+import { getProject, updateProject, listProjects, getUser, limitsFor } from './db.js';
 import { appendLog, resetLog } from './logs.js';
 import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
 
@@ -37,6 +37,11 @@ function releaseBuildSlot() {
 const busy = new Set();
 export const isBusy = (id) => busy.has(id);
 
+// 利用者に見せる文字列から、サーバー内部のフォルダの場所を伏せる(git や docker のエラーに含まれる)
+export function redact(text) {
+  return String(text).split(config.dataDir).join('<data>');
+}
+
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { ...opts, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -63,7 +68,7 @@ async function cloneRepo(p, dir) {
       }
     );
   } catch (e) {
-    throw new Error(`git clone に失敗しました: ${(e.stderr || e.message).toString().trim().slice(0, 500)}`);
+    throw new Error(`git clone に失敗しました: ${redact((e.stderr || e.message).toString().trim()).slice(0, 500)}`);
   }
   // リポジトリサイズの上限チェック
   let total = 0;
@@ -211,6 +216,29 @@ const nowIso = () => new Date().toISOString();
 export const activeCount = (excludeId) =>
   listProjects().filter((p) => ACTIVE.has(p.status) && p.id !== excludeId).length;
 
+// ---- 利用者ごとの同時起動数 ---------------------------------------------------------
+// 上限に達したときに投げる。画面には、そのまま理由として表示される。
+export class QuotaError extends Error {}
+
+// その人が枠を使っているもの(ビルド中・実行中・順番待ち)。順番待ちも数えるのは、
+// 待機列に何件も積んで、全体の枠を独占されないようにするため。
+const OCCUPY = new Set(['building', 'running', 'queued']);
+export const userOccupied = (userId, excludeId) =>
+  listProjects(userId).filter((p) => OCCUPY.has(p.status) && p.id !== excludeId).length;
+
+// 持ち主のいないプロジェクト(管理者が作った古いもの)は、制限しない
+export function assertRunQuota(userId, excludeId) {
+  if (!userId) return;
+  const user = getUser(userId);
+  if (!user) return;
+  const { maxRunning } = limitsFor(user);
+  if (userOccupied(userId, excludeId) >= maxRunning) {
+    throw new QuotaError(
+      `同時に起動できるのは ${maxRunning} 件までです。ほかのプロジェクトを停止してから起動してください`
+    );
+  }
+}
+
 // 待機中のプロジェクトを、待ち始めた順に返す
 export function queueOrder() {
   return listProjects()
@@ -241,6 +269,7 @@ export function startProject(id) {
   if (!p) throw new Error('not found');
   if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
   if (p.status === 'queued') return; // すでに順番待ち
+  assertRunQuota(p.user_id, id);
   if (activeCount(id) >= config.maxRunning) {
     updateProject(id, { status: 'queued', error: null, queued_at: nowIso() });
     resetLog(id);
@@ -287,8 +316,9 @@ function launch(id) {
       updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso() });
       appendLog(id, `==> 起動しました: ${previewUrl(id)}`);
     } catch (e) {
-      appendLog(id, `!! 失敗: ${e.message}`);
-      updateProject(id, { status: 'failed', error: e.message.slice(0, 1000), started_at: null });
+      const msg = redact(e.message);
+      appendLog(id, `!! 失敗: ${msg}`);
+      updateProject(id, { status: 'failed', error: msg.slice(0, 1000), started_at: null });
       // 失敗したら何も動いていない状態にそろえる
       try {
         await removeContainer(id);
@@ -323,6 +353,19 @@ export async function stopProject(id) {
     busy.delete(id);
   }
   drainQueue();
+}
+
+// 凍結されたときなどに、その人の動いているものを止める(処理中のものは、定期処理が後で止める)
+export async function stopUserProjects(userId) {
+  for (const p of listProjects(userId)) {
+    if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
+    try {
+      appendLog(p.id, '==> アカウントが利用できない状態になったため停止します');
+      await stopProject(p.id);
+    } catch (e) {
+      console.warn(`[stopUserProjects] ${p.id} を停止できません: ${e.message}`);
+    }
+  }
 }
 
 export async function deleteProjectResources(id) {
@@ -403,23 +446,37 @@ export async function reconcile() {
   drainQueue();
 }
 
-// 最大稼働時間を超えたものを自動停止 / DNS の取り残しを定期的に掃除
-export function startReaper() {
-  if (config.maxRuntimeHours) {
-    setInterval(async () => {
-      const limitMs = config.maxRuntimeHours * 3600 * 1000;
-      for (const p of listProjects()) {
-        if (p.status !== 'running' || !p.started_at || busy.has(p.id)) continue;
-        if (Date.now() - Date.parse(p.started_at) <= limitMs) continue;
-        try {
-          appendLog(p.id, `==> 最大稼働時間(${config.maxRuntimeHours}時間)を超えたため停止します`);
-          await stopProject(p.id);
-        } catch (e) {
-          console.warn(`[reaper] ${p.id} を停止できません: ${e.message}`);
-        }
-      }
-    }, 60_000).unref();
+// 停止すべきプロジェクトを探す。理由を返す(止めなくてよければ null)
+//   - 持ち主のアカウントが「承認済み」でなくなった(凍結など)
+//   - 最大稼働時間を超えた
+export function stopReason(p, nowMs = Date.now()) {
+  if (p.user_id) {
+    const owner = getUser(p.user_id);
+    if (!owner || owner.status !== 'approved') return 'アカウントが利用できない状態のため停止します';
   }
+  if (config.maxRuntimeHours && p.status === 'running' && p.started_at) {
+    if (nowMs - Date.parse(p.started_at) > config.maxRuntimeHours * 3600 * 1000) {
+      return `最大稼働時間(${config.maxRuntimeHours}時間)を超えたため停止します`;
+    }
+  }
+  return null;
+}
+
+// 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
+export function startReaper() {
+  setInterval(async () => {
+    for (const p of listProjects()) {
+      if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
+      const reason = stopReason(p);
+      if (!reason) continue;
+      try {
+        appendLog(p.id, `==> ${reason}`);
+        await stopProject(p.id);
+      } catch (e) {
+        console.warn(`[reaper] ${p.id} を停止できません: ${e.message}`);
+      }
+    }
+  }, 60_000).unref();
   if (dnsEnabled()) setInterval(sweepDns, 30 * 60_000).unref();
 }
 

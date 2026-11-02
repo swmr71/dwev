@@ -50,20 +50,34 @@
   .err { color: var(--red); font-size: 13px; margin-top: 8px; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .empty { color: var(--muted); text-align: center; padding: 24px; }
+  a.btn { display: inline-block; text-decoration: none; border-radius: 8px; padding: 8px 16px; font-size: 14px;
+    background: linear-gradient(90deg, var(--purple), var(--blue)); color: #0b0d12; font-weight: 600; }
+  .user { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .user img { width: 24px; height: 24px; border-radius: 50%; }
+  .notice { border-color: var(--orange); }
+  .quota { color: var(--muted); font-size: 12px; margin-top: 6px; }
 </style>
 </head>
 <body>
 <header>
   <h1>devbox</h1>
-  <div style="display:flex;gap:12px;align-items:center"><span class="info" id="info"></span><button id="logout" hidden>ログアウト</button></div>
+  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <span class="info" id="info"></span>
+    <span class="user" id="user" hidden><img id="user-img" alt="" hidden><span id="user-name"></span></span>
+    <button id="logout" hidden>ログアウト</button>
+  </div>
 </header>
 <main>
   <section class="card" id="login" hidden>
-    <strong>管理トークンを入力</strong>
-    <label for="token">ADMIN_TOKEN</label>
-    <input id="token" type="password" autocomplete="off">
-    <div class="actions"><button class="primary" id="login-btn">ログイン</button></div>
-    <div class="err" id="login-err"></div>
+    <strong>devbox へようこそ</strong>
+    <p class="meta">GitHub のリポジトリとブランチを指定すると、開発用のサーバーが立ち上がって、プレビューのURLが発行されます。</p>
+    <div class="actions"><a class="btn" href="/auth/github">GitHub でログイン</a></div>
+    <div class="hint">ログインに使うのは、GitHub のユーザー名とアイコンだけです。リポジトリへのアクセス権は求めません。</div>
+  </section>
+
+  <section class="card notice" id="gate" hidden>
+    <strong id="gate-title"></strong>
+    <p class="meta" id="gate-msg"></p>
   </section>
 
   <section class="card" id="create" hidden>
@@ -87,8 +101,8 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let token = sessionStorage.getItem('devbox_token') || '';
 const openLogs = new Map(); // id -> { type, offset, text }
+let me = null;
 
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
@@ -101,14 +115,20 @@ function el(tag, attrs = {}, ...children) {
   return e;
 }
 
+// ログインは Cookie (HttpOnly) で行う。ブラウザが自動で付けるので、画面側でトークンは持たない。
 async function api(path, opts = {}) {
   const res = await fetch('/api' + path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401) { showLogin('トークンが正しくありません'); throw new Error('unauthorized'); }
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { showLogin(); throw new Error('unauthorized'); }
+  if (res.status === 403 && (data.code === 'pending' || data.code === 'suspended')) {
+    boot(); // 状態が変わった(凍結された、など)ので、表示を作り直す
+    throw new Error(data.error);
+  }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -125,20 +145,61 @@ function parseEnv(text) {
   return env;
 }
 
-function showLogin(msg = '') {
-  $('login').hidden = false; $('create').hidden = true; $('list').hidden = true; $('logout').hidden = true;
-  $('login-err').textContent = msg;
+function show(view) { // view: 'login' | 'gate' | 'app'
+  $('login').hidden = view !== 'login';
+  $('gate').hidden = view !== 'gate';
+  $('create').hidden = view !== 'app';
+  $('list').hidden = view !== 'app';
+  $('logout').hidden = view === 'login';
+  $('user').hidden = view === 'login';
+  if (view !== 'app') $('info').textContent = '';
 }
 
+function showLogin() { clearTimeout(timer); clearTimeout(gateTimer); me = null; show('login'); }
+
+function setUser(u) {
+  $('user-name').textContent = u.login;
+  const img = $('user-img');
+  if (u.avatarUrl) { img.src = u.avatarUrl; img.hidden = false; } else img.hidden = true;
+}
+
+// 使っている量 / 上限 の表示
+function showUsage(i) {
+  const u = me.usage, l = me.limits;
+  $('info').textContent =
+    `プロジェクト ${u.projects}/${l.maxProjects} ・ 同時起動 ${u.running}/${l.maxRunning}` +
+    (i ? ` ・ 全体の稼働 ${i.active}/${i.maxRunning}` : '') +
+    (i && i.maxRuntimeHours ? ` ・ 最大${i.maxRuntimeHours}時間で自動停止` : '');
+}
+
+let gateTimer = null;
 async function boot() {
-  if (!token) return showLogin();
-  try { await refresh(); } catch { return; }
-  $('login').hidden = true; $('create').hidden = false; $('list').hidden = false; $('logout').hidden = false;
+  clearTimeout(gateTimer);
+  const res = await fetch('/api/me', { credentials: 'same-origin' });
+  if (res.status === 401) return showLogin();
+  me = await res.json();
+  setUser(me);
+  if (me.status === 'approved') {
+    show('app');
+    try { await refresh(); } catch { /* 401 は api() が処理する */ }
+    return;
+  }
+  clearTimeout(timer);
+  show('gate');
+  if (me.status === 'pending') {
+    $('gate-title').textContent = '承認待ちです';
+    $('gate-msg').textContent = 'GitHub でのログインは完了しました。管理者が承認すると、開発サーバーを作れるようになります。このページは、承認されると自動で切り替わります。';
+    gateTimer = setTimeout(boot, 15000); // 承認されたかを、定期的に確認する
+  } else {
+    $('gate-title').textContent = 'このアカウントは利用できません';
+    $('gate-msg').textContent = '管理者によって、利用が止められています。心当たりがなければ、管理者に連絡してください。';
+  }
 }
 
-$('login-btn').onclick = () => { token = $('token').value.trim(); sessionStorage.setItem('devbox_token', token); boot(); };
-$('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('login-btn').click(); });
-$('logout').onclick = () => { sessionStorage.removeItem('devbox_token'); token = ''; location.reload(); };
+$('logout').onclick = async () => {
+  try { await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* 画面は戻す */ }
+  location.reload();
+};
 
 $('create-btn').onclick = async () => {
   $('create-err').textContent = '';
@@ -195,8 +256,8 @@ let timer = null;
 async function refresh() {
   const projects = await api('/projects');
   try {
-    const i = await api('/info');
-    $('info').textContent = `稼働 ${i.active} / ${i.maxRunning}` + (i.maxRuntimeHours ? ` ・ 最大${i.maxRuntimeHours}時間で自動停止` : '');
+    me = { ...me, ...(await (await fetch('/api/me', { credentials: 'same-origin' })).json()) };
+    showUsage(await api('/info'));
   } catch { /* 情報が取れなくても本体は動かす */ }
   // ビルドログの差分取得
   for (const p of projects) {

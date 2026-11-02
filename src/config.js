@@ -40,6 +40,18 @@ export const config = {
   adminToken,
   generatedToken,
 
+  // 公開URL(OAuthのコールバックURLと、CookieのSecure判定に使う)。例: https://devbox.clusters-prj.com
+  publicUrl: (process.env.PUBLIC_URL || '').replace(/\/+$/, ''),
+  // GitHub OAuth App の認証情報。両方そろったときだけ利用者のログインが有効になる。
+  github: {
+    clientId: process.env.GITHUB_CLIENT_ID || '',
+    clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
+  },
+  sessionDays: int(process.env.SESSION_DAYS, 14),
+  // 利用者ごとの既定の上限(管理画面から人ごとに変えられる)
+  defaultMaxProjects: int(process.env.DEFAULT_MAX_PROJECTS, 3),
+  defaultMaxRunning: int(process.env.DEFAULT_MAX_RUNNING_PER_USER, 1),
+
   // プレビューURL。{id} が置換される。
   // 例: "{id}-dev.clusters-prj.com" (Cloudflareの無料Universal SSLは1階層ワイルドカードのみ対応)
   previewHostTemplate: process.env.PREVIEW_HOST_TEMPLATE || '{id}.localtest.me',
@@ -77,7 +89,8 @@ export const config = {
     memoryMb: int(process.env.LIMIT_MEMORY_MB, 512),
     cpus: Number(process.env.LIMIT_CPUS) > 0 ? Number(process.env.LIMIT_CPUS) : 1,
     pids: int(process.env.LIMIT_PIDS, 256),
-    maxProjects: int(process.env.MAX_PROJECTS, 10),
+    // サーバー全体のプロジェクト数の上限(利用者ごとの上限とは別)
+    maxProjects: int(process.env.MAX_PROJECTS, 200),
     maxConcurrentBuilds: int(process.env.MAX_CONCURRENT_BUILDS, 2),
     cloneTimeoutSec: int(process.env.CLONE_TIMEOUT_SEC, 120),
     maxRepoMb: int(process.env.MAX_REPO_MB, 300),

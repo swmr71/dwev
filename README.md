@@ -27,11 +27,48 @@ docker compose up -d --build
 
 1. **専用VMで動かす**(Bitwarden 等が同居する DockerV は避ける)
 2. `scripts/egress-firewall.sh` を適用して、開発コンテナから社内LAN (`10.0.0.0/8` など) と VM 本体への通信を遮断し、適用後に表示される確認コマンドで検証する。再起動後も残すには `scripts/devbox-egress.service` を入れる(手順はファイルの先頭に記載)。あわせて Proxmox の VM ファイアウォール(net0 の Firewall にチェック)でも `10.0.0.0/8` 宛てを OUT で DROP にしておくと二重になる
-3. 管理画面 (`DEVBOX_HOST`) を Cloudflare Access で保護する
+3. **管理者用の `/admin` と `/api/admin` だけ** を Cloudflare Access で保護する(下の「利用者のログインと承認」を参照)。利用者が使う `/` は Access で守らない
 4. 可能なら gVisor (`DOCKER_RUNTIME=runsc`) を導入
-5. 現状は管理トークン1つだけの認証。不特定多数に開く前に、ユーザー別ログイン・クォータ・アイドル自動停止が必要
+5. 「既知のリスク」(下)を読んで、受け入れられるか判断する
 
 `docker.sock` をマウントしているため、devbox 自体が侵害されるとホスト全体が危険になります。
+
+## 利用者のログインと承認
+
+利用者は GitHub アカウントでログインします(GitHub には、ユーザー名とアイコンの取得しか求めません。リポジトリへの権限は取りません)。
+
+- 初めてログインした人は **「承認待ち」** になり、管理者が `/admin/` で承認するまで、何も作れません
+- 1人あたりの上限は、既定で **プロジェクト3件・同時起動1件**(ビルド中・順番待ちも数える)。管理画面から人ごとに変えられます
+- 他人のプロジェクトは、一覧に出ず、URLを知っていても 404 になります
+- 管理画面で「凍結」すると、ログインが無効になり、その人の動いているものも止まります
+
+### 設定手順
+
+1. GitHub → Settings → Developer settings → OAuth Apps → **New OAuth App**
+   - Homepage URL: `https://devbox.clusters-prj.com`
+   - Authorization callback URL: `https://devbox.clusters-prj.com/auth/github/callback`
+2. 作成後の **Client ID** と、**Generate a new client secret** で出した値を、`.env` に書く(`PUBLIC_URL` / `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`)
+3. `docker compose up -d devbox` で反映
+4. **Cloudflare Access の設定を変える**: Zero Trust → Access → アプリケーション で、`devbox.clusters-prj.com` 全体を守っているアプリを、次のパスだけに絞る
+   - `devbox.clusters-prj.com/admin`(`/admin/` 以下も含む)
+   - `devbox.clusters-prj.com/api/admin`
+
+   ホスト全体を守ったままだと、利用者がログイン画面まで来られません。逆に、絞り忘れると、管理画面が管理トークンだけで守られる状態になります。
+5. 自分自身も、一度 GitHub でログインして「承認待ち」になり、`/admin/` で自分を承認する
+
+### 管理画面 (`/admin/`)
+
+管理トークン(`ADMIN_TOKEN`)でログインします。承認待ちの人の承認・拒否、人ごとの上限の変更、凍結、全プロジェクトの停止・削除ができます。
+
+## 既知のリスク
+
+- **プレビューは、あなたのドメイン(`clusters-prj.com`)の下で、他人が書いたコードを配信します。**
+  同じドメインの別サイトの Cookie が、プレビューのコードから読まれたり、上書きされたりする可能性があります
+  (devbox 自身の Cookie は `__Host-` 付きで、これを避けています)。また、悪用されると、ドメイン自体の評判が下がります。
+  不特定多数に開くなら、プレビュー専用に別のドメインを用意するのが、根本的な対策です。
+- 開発コンテナからは、インターネットに自由に出られます(社内LAN・VM本体は遮断)。外部への攻撃やマイニングに使われると、
+  家の回線のIPアドレスから出ていくことになります。
+- 他人のコードを動かす以上、コンテナの脱出に対する備えは、Docker の標準的な分離と制限(権限の削除、リソース制限)だけです。gVisor の導入を推奨します。
 
 ## プレビューを外に公開する(専用トンネル + DNS自動作成)
 
@@ -84,16 +121,25 @@ DNS レコードは常に最大 `MAX_RUNNING` 件しか増えません。
 |---|---|
 | コンテナ | `cap-drop ALL` / `no-new-privileges` / 非特権 / メモリ・CPU・PID数の上限 / swap無効 |
 | 入力 | リポジトリは `https://<許可ホスト>/owner/repo` のみ / ブランチ・env名を厳格に検証 |
-| リソース | プロジェクト数上限 / 同時ビルド数上限 / clone タイムアウト / リポジトリサイズ上限 |
-| ネットワーク | 管理APIと docker-socket-proxy はユーザーのコンテナと別ネットワーク |
+| リソース | 利用者ごとのプロジェクト数・同時起動数の上限 / 全体の同時稼働数(超えたら順番待ち) / 同時ビルド数上限 / clone タイムアウト / リポジトリサイズ上限 / 最大稼働時間 |
+| ネットワーク | 管理APIと docker-socket-proxy はユーザーのコンテナと別ネットワーク。社内LAN・VM本体への通信は遮断 |
+| 認証 | GitHub ログイン + 管理者の承認制。セッションは HttpOnly / SameSite=Lax / `__Host-` 付き Cookie(DBにはハッシュだけ保存)。変更系は same-origin のみ |
+| 表示 | エラーメッセージからサーバー内部のフォルダの場所を伏せる |
 
 ## API
 
-すべて `Authorization: Bearer <ADMIN_TOKEN>` が必要。
+### 利用者向け
+
+GitHub でログインして Cookie を持っていて、かつ「承認済み」の人だけが使えます(`/api/me` はログインだけで可)。
+他人のプロジェクトは 404。変更系のリクエストは、同じ出どころ(same-origin)からのものだけを受け付けます。
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| GET | `/api/projects` | 一覧 |
+| GET | `/auth/github` | GitHub のログインへ(ブラウザで開く) |
+| POST | `/auth/logout` | ログアウト |
+| GET | `/api/me` | 自分の状態・上限・使用量 |
+| GET | `/api/info` | 全体の稼働数など |
+| GET | `/api/projects` | 自分のプロジェクト一覧 |
 | POST | `/api/projects` | 作成 `{name, repoUrl, branch, port, env, autoStart}` |
 | PATCH | `/api/projects/:id` | name / branch / port / env の更新(反映は再ビルド後) |
 | POST | `/api/projects/:id/start` | ビルド→起動(再ビルド兼用) |
@@ -101,6 +147,19 @@ DNS レコードは常に最大 `MAX_RUNNING` 件しか増えません。
 | DELETE | `/api/projects/:id` | コンテナ・イメージ・ログ・レコードを削除 |
 | GET | `/api/projects/:id/build-log?offset=N` | ビルドログの差分 |
 | GET | `/api/projects/:id/runtime-log` | 実行ログ |
+
+### 管理者向け
+
+すべて `Authorization: Bearer <ADMIN_TOKEN>` が必要(Cloudflare Access でも保護する)。
+
+| メソッド | パス | 内容 |
+|---|---|---|
+| GET | `/api/admin/info` | 全体の状態(稼働数・承認待ちの人数・既定の上限など) |
+| GET | `/api/admin/users` | 利用者の一覧 |
+| PATCH | `/api/admin/users/:id` | `{status: "approved"\|"pending"\|"suspended", maxProjects, maxRunning}`(上限は null で既定に戻す)。承認を外すと、ログインを無効にして、動いているものを止める |
+| GET | `/api/admin/projects` | 全プロジェクト(持ち主つき) |
+| POST | `/api/admin/projects/:id/stop` | 停止 |
+| DELETE | `/api/admin/projects/:id` | 削除 |
 
 ## 開発
 
@@ -119,4 +178,6 @@ Node 22.5+ が必要(組み込みの `node:sqlite` を使用)。
 - プライベートリポジトリ未対応(GitHub App 連携が必要)
 - ブラウザ内エディタ (code-server) は未実装
 - 無操作検知での自動停止は未実装(起動からの最大稼働時間 `MAX_RUNTIME_HOURS` のみ)
-- ユーザー別クォータは未実装
+- 新規登録の通知は未実装(管理画面を開くと「承認待ち」が出る)
+- ログインの試行回数の制限は未実装
+- 利用者のアカウント削除・データのエクスポートは未実装(凍結のみ)
