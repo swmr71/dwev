@@ -93,6 +93,7 @@ api.get('/info', ...guard, (_req, res) => {
     active: activeCount(),
     maxRunning: config.maxRunning,
     maxRuntimeHours: config.maxRuntimeHours,
+    idleStopMinutes: config.idleStopMinutes,
   });
 });
 

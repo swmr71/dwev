@@ -64,6 +64,10 @@ export const config = {
   // 最大稼働時間(時間)。超えたら自動停止。0 なら無効。
   maxRuntimeHours: Number(process.env.MAX_RUNTIME_HOURS) > 0 ? Number(process.env.MAX_RUNTIME_HOURS) : 0,
 
+  // 無操作でこの時間(分)たったら自動停止。0 なら無効。
+  // 「操作」は、コンテナが受け取った通信量(プレビューへのアクセス)が増えたかどうかで見る。
+  idleStopMinutes: Number(process.env.IDLE_STOP_MINUTES ?? 60) > 0 ? Number(process.env.IDLE_STOP_MINUTES ?? 60) : 0,
+
   // プレビュー用DNSレコードの自動作成・削除 (Cloudflare API)。3つ全部設定したときだけ有効。
   //   CF_API_TOKEN : 権限は「対象ゾーンの DNS 編集」だけにすること
   //   CF_ZONE_ID   : clusters-prj.com のゾーンID

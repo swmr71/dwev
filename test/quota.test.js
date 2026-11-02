@@ -8,6 +8,7 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'devbox-quota-'));
 process.env.ADMIN_TOKEN = 'x';
 process.env.MAX_RUNNING = '100';
 process.env.MAX_RUNTIME_HOURS = '1';
+process.env.IDLE_STOP_MINUTES = '10';
 
 const { insertProject, updateProject, getProject, newId, upsertGithubUser, updateUser, limitsFor } =
   await import('../src/db.js');
@@ -93,7 +94,7 @@ test('stopReason: 承認済みでなくなった持ち主のものは止める /
   const ok = mkUser(10);
   const bad = mkUser(11, 'suspended');
   const pending = mkUser(12, 'pending');
-  const recent = new Date(Date.now() - 30 * 60_000).toISOString();
+  const recent = new Date(Date.now() - 5 * 60_000).toISOString();
   const old = new Date(Date.now() - 2 * 3600_000).toISOString();
 
   const fresh = updateProject(mkProject(ok.id, 'running').id, { started_at: recent });
@@ -118,4 +119,25 @@ test('redact: 利用者に見せる文字列から、サーバー内部のフォ
   const out = redact(msg);
   assert.ok(!out.includes(config.dataDir), out);
   assert.equal(out, "Cloning into '<data>/work/abc'... (<data>/work/abc.home)");
+});
+
+test('stopReason: 無操作が長く続いたら止める(最後の操作の時刻で数え、無ければ起動時刻から)', () => {
+  const ok = mkUser(20);
+  const ago = (min) => new Date(Date.now() - min * 60_000).toISOString();
+
+  // 起動は30分前でも、5分前に操作があれば止めない
+  const active = updateProject(mkProject(ok.id, 'running').id, { started_at: ago(30), last_active_at: ago(5) });
+  assert.equal(stopReason(active), null);
+
+  // 最後の操作が15分前なら止める
+  const idle = updateProject(mkProject(ok.id, 'running').id, { started_at: ago(30), last_active_at: ago(15) });
+  assert.match(stopReason(idle), /10分間操作がなかった/);
+
+  // 操作の記録がなければ、起動時刻から数える
+  const noRecord = updateProject(mkProject(ok.id, 'running').id, { started_at: ago(20) });
+  assert.match(stopReason(noRecord), /操作がなかった/);
+  assert.equal(stopReason(updateProject(mkProject(ok.id, 'running').id, { started_at: ago(3) })), null);
+
+  // 待機中は対象外
+  assert.equal(stopReason(updateProject(mkProject(ok.id, 'queued').id, { last_active_at: ago(60) })), null);
 });

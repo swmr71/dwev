@@ -101,6 +101,7 @@ DNS レコードは常に最大 `MAX_RUNNING` 件しか増えません。
    DNS_TARGET=<UUID>.cfargotunnel.com
    MAX_RUNNING=30
    MAX_RUNTIME_HOURS=8
+   IDLE_STOP_MINUTES=60
    ```
 5. **起動**: `docker compose --profile preview-tunnel up -d --build`
 
@@ -177,7 +178,6 @@ Node 22.5+ が必要(組み込みの `node:sqlite` を使用)。
 - Node 以外の自動判定は未対応(Dockerfile を置いてください)
 - プライベートリポジトリ未対応(GitHub App 連携が必要)
 - ブラウザ内エディタ (code-server) は未実装
-- 無操作検知での自動停止は未実装(起動からの最大稼働時間 `MAX_RUNTIME_HOURS` のみ)
 - 新規登録の通知は未実装(管理画面を開くと「承認待ち」が出る)
 - ログインの試行回数の制限は未実装
 - 利用者のアカウント削除・データのエクスポートは未実装(凍結のみ)

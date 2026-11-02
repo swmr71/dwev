@@ -313,7 +313,7 @@ function launch(id) {
       }
       appendLog(id, '==> コンテナを起動');
       const containerId = await runContainer(p);
-      updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso() });
+      updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso(), last_active_at: nowIso() });
       appendLog(id, `==> 起動しました: ${previewUrl(id)}`);
     } catch (e) {
       const msg = redact(e.message);
@@ -348,7 +348,8 @@ export async function stopProject(id) {
   try {
     await removeContainer(id);
     await safeDeleteDns(id);
-    updateProject(id, { status: 'stopped', container_id: null, started_at: null });
+    updateProject(id, { status: 'stopped', container_id: null, started_at: null, last_active_at: null });
+    lastRx.delete(id);
   } finally {
     busy.delete(id);
   }
@@ -449,6 +450,7 @@ export async function reconcile() {
 // 停止すべきプロジェクトを探す。理由を返す(止めなくてよければ null)
 //   - 持ち主のアカウントが「承認済み」でなくなった(凍結など)
 //   - 最大稼働時間を超えた
+//   - 無操作の時間が長い
 export function stopReason(p, nowMs = Date.now()) {
   if (p.user_id) {
     const owner = getUser(p.user_id);
@@ -459,12 +461,40 @@ export function stopReason(p, nowMs = Date.now()) {
       return `最大稼働時間(${config.maxRuntimeHours}時間)を超えたため停止します`;
     }
   }
+  if (config.idleStopMinutes && p.status === 'running') {
+    const last = Date.parse(p.last_active_at || p.started_at || '');
+    if (last && nowMs - last > config.idleStopMinutes * 60_000) {
+      return `${config.idleStopMinutes}分間操作がなかったため停止します`;
+    }
+  }
   return null;
+}
+
+// ---- 無操作の検知 -----------------------------------------------------------
+// コンテナが受け取った通信量(rx_bytes)が、前回より IDLE_RX_BYTES 以上増えていれば「操作あり」とする。
+// プレビューへのアクセスは必ずコンテナへの受信になる。コンテナが再起動して数字が戻った場合も「操作あり」。
+const IDLE_RX_BYTES = 2048;
+const lastRx = new Map();
+
+async function sampleActivity(p) {
+  if (!config.idleStopMinutes || p.status !== 'running' || !p.container_id) return;
+  try {
+    const stats = await docker.getContainer(p.container_id).stats({ stream: false, 'one-shot': true });
+    const rx = Object.values(stats.networks || {}).reduce((sum, n) => sum + (n.rx_bytes || 0), 0);
+    const prev = lastRx.get(p.id);
+    lastRx.set(p.id, rx);
+    if (prev !== undefined && (rx < prev || rx - prev >= IDLE_RX_BYTES)) {
+      updateProject(p.id, { last_active_at: nowIso() });
+    }
+  } catch {
+    /* 取れなかった回は、操作なしとして数える */
+  }
 }
 
 // 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
 export function startReaper() {
   setInterval(async () => {
+    await Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleActivity));
     for (const p of listProjects()) {
       if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
       const reason = stopReason(p);

@@ -42,7 +42,7 @@ before(async () => {
 
 after(() => {
   server.close();
-  fs.rmSync(tmp, { recursive: true, force: true });
+  try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5 }); } catch {} // Windows では SQLite のファイルが開いたままで消せない
 });
 
 const valid = {
