@@ -99,8 +99,21 @@ function pickDockerfile(p, dir) {
   return '.devbox.Dockerfile';
 }
 
+// ビルドのリソース制限。メモリ・CPU・ネットワーク(実行時と同じ devbox-net)
+export function buildLimitOpts() {
+  const mem = config.limits.buildMemoryMb * 1024 * 1024;
+  return {
+    memory: mem,
+    memswap: mem, // swap無効
+    cpuperiod: 100_000,
+    cpuquota: Math.round(config.limits.buildCpus * 100_000),
+    networkmode: config.dockerNetwork,
+  };
+}
+
 async function buildImage(p, dir, dockerfile) {
   appendLog(p.id, '==> docker build');
+  await ensureNetwork();
   const context = tar.pack(dir, { ignore: (name) => name.split(path.sep).includes('.git') });
   const stream = await docker.buildImage(context, {
     t: imageName(p.id),
@@ -108,11 +121,18 @@ async function buildImage(p, dir, dockerfile) {
     rm: true,
     forcerm: true,
     labels: { 'devbox.id': p.id },
+    ...buildLimitOpts(),
   });
   await new Promise((resolve, reject) => {
+    // 時間切れ: 接続を切るとビルドが中断される
+    const timer = setTimeout(() => {
+      stream.destroy();
+      reject(new Error(`ビルドが長すぎます (上限 ${config.limits.buildTimeoutSec}秒)`));
+    }, config.limits.buildTimeoutSec * 1000);
     docker.modem.followProgress(
       stream,
       (err, res) => {
+        clearTimeout(timer);
         if (err) return reject(err);
         const last = res?.find((r) => r.error);
         if (last) return reject(new Error(last.error.trim()));

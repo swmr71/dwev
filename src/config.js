@@ -98,6 +98,11 @@ export const config = {
     maxConcurrentBuilds: int(process.env.MAX_CONCURRENT_BUILDS, 2),
     cloneTimeoutSec: int(process.env.CLONE_TIMEOUT_SEC, 120),
     maxRepoMb: int(process.env.MAX_REPO_MB, 300),
+    // docker build(Dockerfile の RUN)の制限。ビルドは実行中のコンテナと同じネットワークで動かし、
+    // 社内LAN・VM本体への通信遮断(egress-firewall.sh)をビルド中にも効かせる。
+    buildMemoryMb: int(process.env.BUILD_MEMORY_MB, 2048),
+    buildCpus: Number(process.env.BUILD_CPUS) > 0 ? Number(process.env.BUILD_CPUS) : 2,
+    buildTimeoutSec: int(process.env.BUILD_TIMEOUT_SEC, 900),
   },
 
   // gVisor等を使う場合: DOCKER_RUNTIME=runsc

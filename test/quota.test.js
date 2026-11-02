@@ -141,3 +141,13 @@ test('stopReason: 無操作が長く続いたら止める(最後の操作の時�
   // 待機中は対象外
   assert.equal(stopReason(updateProject(mkProject(ok.id, 'queued').id, { last_active_at: ago(60) })), null);
 });
+
+test('buildLimitOpts: ビルドにメモリ・CPU上限と、実行時と同じネットワークを使う', async () => {
+  const { buildLimitOpts } = await import('../src/manager.js');
+  const { config } = await import('../src/config.js');
+  const o = buildLimitOpts();
+  assert.equal(o.memory, config.limits.buildMemoryMb * 1024 * 1024);
+  assert.equal(o.memswap, o.memory);
+  assert.equal(o.cpuquota, config.limits.buildCpus * o.cpuperiod);
+  assert.equal(o.networkmode, config.dockerNetwork);
+});
