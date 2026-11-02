@@ -20,6 +20,12 @@ db.exec(`
   );
 `);
 
+// 既存DBへの列追加(待機に入った時刻・稼働開始時刻)
+const existingCols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+for (const col of ['queued_at', 'started_at']) {
+  if (!existingCols.includes(col)) db.exec(`ALTER TABLE projects ADD COLUMN ${col} TEXT`);
+}
+
 const now = () => new Date().toISOString();
 
 export const newId = () => crypto.randomBytes(5).toString('hex'); // DNS-safe (hex, 10文字)
@@ -45,7 +51,9 @@ export function insertProject(p) {
   return getProject(p.id);
 }
 
-const COLUMNS = new Set(['name', 'branch', 'env_enc', 'port', 'status', 'container_id', 'error']);
+const COLUMNS = new Set([
+  'name', 'branch', 'env_enc', 'port', 'status', 'container_id', 'error', 'queued_at', 'started_at',
+]);
 
 export function updateProject(id, fields) {
   const keys = Object.keys(fields);

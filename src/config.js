@@ -47,6 +47,21 @@ export const config = {
   // プレビューURLに付けるポート(LAN内で :8080 のまま使うときなど)。未設定なら付けない
   previewPort: int(process.env.PREVIEW_PORT, 0) || '',
 
+  // 同時に動かせる(ビルド中+実行中)プロジェクト数の上限。超えたら「待機中」になる。
+  maxRunning: int(process.env.MAX_RUNNING, 30),
+  // 最大稼働時間(時間)。超えたら自動停止。0 なら無効。
+  maxRuntimeHours: Number(process.env.MAX_RUNTIME_HOURS) > 0 ? Number(process.env.MAX_RUNTIME_HOURS) : 0,
+
+  // プレビュー用DNSレコードの自動作成・削除 (Cloudflare API)。3つ全部設定したときだけ有効。
+  //   CF_API_TOKEN : 権限は「対象ゾーンの DNS 編集」だけにすること
+  //   CF_ZONE_ID   : clusters-prj.com のゾーンID
+  //   DNS_TARGET   : CNAME の向き先。例 <トンネルUUID>.cfargotunnel.com
+  cloudflare: {
+    token: process.env.CF_API_TOKEN || '',
+    zoneId: process.env.CF_ZONE_ID || '',
+    target: process.env.DNS_TARGET || '',
+  },
+
   // Traefik と接続する Docker ネットワーク
   dockerNetwork: process.env.DOCKER_NETWORK || 'devbox-net',
   traefikEntrypoint: process.env.TRAEFIK_ENTRYPOINT || 'web',
