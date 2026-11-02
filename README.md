@@ -5,7 +5,7 @@
 ## できること
 
 - Web画面からプロジェクトを作成 → `git clone` → `docker build` → コンテナ起動 → プレビューURL発行
-- `Dockerfile` があればそれを使用。無ければ `package.json` の `dev` / `start` スクリプトで Node 用に自動生成
+- `Dockerfile` があればそれを使用。無ければ中身から判定して自動生成(下の「自動判定」を参照)
 - 環境変数はAES-256-GCMで暗号化して保存(画面・APIにはキー名だけ返す)
 - ビルドログ/実行ログの表示、停止、再ビルド、削除
 
@@ -175,10 +175,24 @@ npm test
 
 Node 22.5+ が必要(組み込みの `node:sqlite` を使用)。
 
+## 自動判定(Dockerfile が無いとき)
+
+| 見つかったもの | 起動コマンド |
+|---|---|
+| `manage.py`(Django) | `migrate --noinput` のあと `runserver 0.0.0.0:$PORT` |
+| `requirements.txt` / `pyproject.toml` に `fastapi` | `uvicorn <main or app>:app --host 0.0.0.0 --port $PORT`(`main.py` / `app.py` / `app/main.py` / `src/main.py`) |
+| 同じく `flask` | `flask --app <app or wsgi or main> run --host 0.0.0.0 --port $PORT` |
+| `package.json` | `dev`、無ければ `start`。`pnpm-lock.yaml` / `yarn.lock` があれば pnpm / yarn。Vite と Next には待ち受け先の引数を足す |
+
+- Python は `python:3.12-slim`、Node は `node:22-slim`。上のどれにも当てはまらなければ、Dockerfile を置いてもらうエラーになります
+- `package.json` と Python のファイルが両方ある場合は、`manage.py` がなければ Node(フロント用)を優先します
+- **Django は、プレビューのホスト名を `ALLOWED_HOSTS` に入れる必要があります**(入れないと `DisallowedHost` で 400 になる)。
+  環境変数で渡して settings で読む(例 `ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")`)のが簡単です
+- Vite の新しい版は `server.allowedHosts` に無いホストを断ります。プレビューのホスト名を許可してください
+
 ## 制約・今後
 
 - 開発サーバーは `0.0.0.0` で待ち受ける必要あり(`HOST` / `PORT` 環境変数を渡します。Vite なら `--host` が必要)
-- Node 以外の自動判定は未対応(Dockerfile を置いてください)
 - プライベートリポジトリ未対応(GitHub App 連携が必要)
 - ブラウザ内エディタ (code-server) は未実装
 - 新規登録の通知は未実装(管理画面を開くと「承認待ち」が出る)

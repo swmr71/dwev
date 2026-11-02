@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { decryptJson } from './crypto.js';
 import { getProject, updateProject, listProjects, getUser, limitsFor } from './db.js';
 import { appendLog, resetLog } from './logs.js';
+import { detectRuntime } from './runtimes.js';
 import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
 
 const docker = new Docker(); // /var/run/docker.sock
@@ -86,36 +87,16 @@ async function cloneRepo(p, dir) {
   walk(dir);
 }
 
-// Dockerfile があればそれを使い、無ければ package.json から Node 用を自動生成する。
+// Dockerfile があればそれを使い、無ければ中身から実行環境を判定して自動生成する。
 function pickDockerfile(p, dir) {
   if (fs.existsSync(path.join(dir, 'Dockerfile'))) {
     appendLog(p.id, '==> Dockerfile を検出');
     return 'Dockerfile';
   }
-  const pkgFile = path.join(dir, 'package.json');
-  if (fs.existsSync(pkgFile)) {
-    let pkg = {};
-    try {
-      pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-    } catch {
-      throw new Error('package.json を解析できません');
-    }
-    const script = pkg.scripts?.dev ? 'dev' : pkg.scripts?.start ? 'start' : null;
-    if (!script) throw new Error('package.json に dev / start スクリプトがありません');
-    appendLog(p.id, `==> package.json を検出 → Node 用 Dockerfile を自動生成 (npm run ${script})`);
-    const content = [
-      'FROM node:22-slim',
-      'WORKDIR /app',
-      'COPY package*.json ./',
-      'RUN npm install',
-      'COPY . .',
-      `CMD ["npm", "run", "${script}"]`,
-      '',
-    ].join('\n');
-    fs.writeFileSync(path.join(dir, '.devbox.Dockerfile'), content);
-    return '.devbox.Dockerfile';
-  }
-  throw new Error('Dockerfile も package.json も見つかりません。Dockerfile を追加してください');
+  const rt = detectRuntime(dir);
+  appendLog(p.id, `==> ${rt.label} を検出 → Dockerfile を自動生成`);
+  fs.writeFileSync(path.join(dir, '.devbox.Dockerfile'), rt.dockerfile);
+  return '.devbox.Dockerfile';
 }
 
 async function buildImage(p, dir, dockerfile) {
