@@ -1,0 +1,81 @@
+# devbox 本体 + Traefik (プレビューURLのルーティング)
+#
+# 想定構成:
+#   Cloudflare Tunnel → traefik:80 → (ホスト名で振り分け)
+#     ├─ ${DEVBOX_HOST}            → devbox (管理画面/API)  ← Cloudflare Access で必ず保護すること
+#     └─ <id>-dev.example.com ... → ユーザーが起動した開発コンテナ
+#
+# ネットワークを2つに分けているのは、ユーザーのコンテナから管理APIや
+# docker-socket-proxy に直接届かないようにするため。
+#   devbox-net     : Traefik とユーザーのコンテナ (172.30.0.0/16 固定、egress制限の対象)
+#   devbox-control : Traefik / devbox / socket-proxy (ユーザーのコンテナは参加しない)
+
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1   # Traefik にはコンテナ一覧の読み取りだけ許可
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [devbox-control]
+
+  traefik:
+    image: traefik:v3.6
+    restart: unless-stopped
+    command:
+      - --providers.docker.endpoint=tcp://socket-proxy:2375
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --ping=true
+    ports:
+      - "${TRAEFIK_BIND:-127.0.0.1}:${TRAEFIK_PORT:-8080}:80"   # Cloudflare Tunnel の転送先に指定する
+    depends_on: [socket-proxy]
+    networks: [devbox-net, devbox-control]
+
+  devbox:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      DOCKER_NETWORK: devbox-net
+    volumes:
+      - devbox-data:/data
+      # 注意: docker.sock をマウントするため、devbox が侵害されるとホスト全体が危険。
+      # 管理画面は必ず Cloudflare Access 等で保護し、ADMIN_TOKEN は長いランダム値にすること。
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: devbox-control
+      traefik.http.routers.devbox.rule: Host(`${DEVBOX_HOST:-devbox.localtest.me}`)
+      traefik.http.routers.devbox.entrypoints: web
+      traefik.http.services.devbox.loadbalancer.server.port: "3000"
+    # devbox-net には参加しない (ユーザーのコンテナから管理APIに届かないようにする)。
+    # コンテナの作成は Docker API 経由なので参加不要。
+    networks: [devbox-control]
+
+  # プレビュー専用の Cloudflare Tunnel (既存のトンネルとは別物)。
+  # 「どのホスト名で来ても Traefik へ」という1ルールだけを持つ。
+  # 起動: docker compose --profile preview-tunnel up -d
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["preview-tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro   # config.yml と <UUID>.json を置く
+    depends_on: [traefik]
+    networks: [devbox-control]
+
+networks:
+  devbox-net:
+    name: devbox-net
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+  devbox-control:
+    name: devbox-control
+
+volumes:
+  devbox-data:

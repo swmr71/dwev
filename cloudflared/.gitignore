@@ -1,0 +1,4 @@
+# 認証情報(<UUID>.json)と config.yml は絶対にコミットしない
+*.json
+config.yml
+!config.yml.example

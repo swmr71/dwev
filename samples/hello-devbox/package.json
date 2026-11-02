@@ -1,0 +1,11 @@
+{
+  "name": "hello-devbox",
+  "version": "1.0.0",
+  "description": "devbox の動作確認用サンプル(依存パッケージなし)",
+  "private": true,
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "type": "module"
+}

@@ -1,0 +1,8 @@
+# プレビュー専用トンネルの設定。<UUID> は `cloudflared tunnel create devbox-preview` で出たもの。
+# このファイルを config.yml にコピーして書き換える。
+tunnel: <UUID>
+credentials-file: /etc/cloudflared/<UUID>.json
+
+# どのホスト名で来ても Traefik に渡す(Traefik が Host ヘッダーで振り分ける)
+ingress:
+  - service: http://traefik:80

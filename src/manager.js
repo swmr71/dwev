@@ -1,0 +1,433 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import Docker from 'dockerode';
+import tar from 'tar-fs';
+import { config } from './config.js';
+import { decryptJson } from './crypto.js';
+import { getProject, updateProject, listProjects } from './db.js';
+import { appendLog, resetLog } from './logs.js';
+import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
+
+const docker = new Docker(); // /var/run/docker.sock
+
+export const previewHost = (id) => config.previewHostTemplate.replace('{id}', id);
+export const previewUrl = (id) =>
+  `${config.previewScheme}://${previewHost(id)}${config.previewPort ? `:${config.previewPort}` : ''}`;
+const imageName = (id) => `devbox/${id}:latest`;
+const containerName = (id) => `devbox-${id}`;
+
+// ---- 同時ビルド数の制限 (簡易セマフォ) -------------------------------------
+let activeBuilds = 0;
+const waiters = [];
+async function acquireBuildSlot() {
+  if (activeBuilds < config.limits.maxConcurrentBuilds) {
+    activeBuilds++;
+    return;
+  }
+  await new Promise((resolve) => waiters.push(resolve));
+}
+function releaseBuildSlot() {
+  const next = waiters.shift();
+  if (next) next();
+  else activeBuilds--;
+}
+
+// ---- プロジェクトごとの排他 -------------------------------------------------
+const busy = new Set();
+export const isBusy = (id) => busy.has(id);
+
+function run(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { ...opts, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(Object.assign(err, { stdout, stderr }));
+      else resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function cloneRepo(p, dir) {
+  appendLog(p.id, `==> git clone ${p.repo_url} (branch: ${p.branch})`);
+  try {
+    await run(
+      'git',
+      [
+        '-c', 'protocol.allow=never',
+        '-c', 'protocol.https.allow=always',
+        'clone', '--depth', '1', '--single-branch', '--no-tags',
+        '--branch', p.branch, '--', p.repo_url, dir,
+      ],
+      {
+        timeout: config.limits.cloneTimeoutSec * 1000,
+        env: { PATH: process.env.PATH, HOME: dir + '.home', GIT_TERMINAL_PROMPT: '0' },
+      }
+    );
+  } catch (e) {
+    throw new Error(`git clone に失敗しました: ${(e.stderr || e.message).toString().trim().slice(0, 500)}`);
+  }
+  // リポジトリサイズの上限チェック
+  let total = 0;
+  const walk = (d) => {
+    for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+      if (ent.name === '.git') continue;
+      const full = path.join(d, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (ent.isFile()) total += fs.statSync(full).size;
+      if (total > config.limits.maxRepoMb * 1024 * 1024) {
+        throw new Error(`リポジトリが大きすぎます (上限 ${config.limits.maxRepoMb}MB)`);
+      }
+    }
+  };
+  walk(dir);
+}
+
+// Dockerfile があればそれを使い、無ければ package.json から Node 用を自動生成する。
+function pickDockerfile(p, dir) {
+  if (fs.existsSync(path.join(dir, 'Dockerfile'))) {
+    appendLog(p.id, '==> Dockerfile を検出');
+    return 'Dockerfile';
+  }
+  const pkgFile = path.join(dir, 'package.json');
+  if (fs.existsSync(pkgFile)) {
+    let pkg = {};
+    try {
+      pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+    } catch {
+      throw new Error('package.json を解析できません');
+    }
+    const script = pkg.scripts?.dev ? 'dev' : pkg.scripts?.start ? 'start' : null;
+    if (!script) throw new Error('package.json に dev / start スクリプトがありません');
+    appendLog(p.id, `==> package.json を検出 → Node 用 Dockerfile を自動生成 (npm run ${script})`);
+    const content = [
+      'FROM node:22-slim',
+      'WORKDIR /app',
+      'COPY package*.json ./',
+      'RUN npm install',
+      'COPY . .',
+      `CMD ["npm", "run", "${script}"]`,
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(dir, '.devbox.Dockerfile'), content);
+    return '.devbox.Dockerfile';
+  }
+  throw new Error('Dockerfile も package.json も見つかりません。Dockerfile を追加してください');
+}
+
+async function buildImage(p, dir, dockerfile) {
+  appendLog(p.id, '==> docker build');
+  const context = tar.pack(dir, { ignore: (name) => name.split(path.sep).includes('.git') });
+  const stream = await docker.buildImage(context, {
+    t: imageName(p.id),
+    dockerfile,
+    rm: true,
+    forcerm: true,
+    labels: { 'devbox.id': p.id },
+  });
+  await new Promise((resolve, reject) => {
+    docker.modem.followProgress(
+      stream,
+      (err, res) => {
+        if (err) return reject(err);
+        const last = res?.find((r) => r.error);
+        if (last) return reject(new Error(last.error.trim()));
+        resolve();
+      },
+      (ev) => {
+        if (ev.stream) appendLog(p.id, ev.stream.replace(/\n$/, ''));
+        else if (ev.status && !ev.progress) appendLog(p.id, ev.status);
+        else if (ev.error) appendLog(p.id, `ERROR: ${ev.error}`);
+      }
+    );
+  });
+}
+
+async function removeContainer(id) {
+  try {
+    const c = docker.getContainer(containerName(id));
+    await c.remove({ force: true });
+  } catch (e) {
+    if (e.statusCode !== 404) throw e;
+  }
+}
+
+async function ensureNetwork() {
+  try {
+    await docker.getNetwork(config.dockerNetwork).inspect();
+  } catch (e) {
+    if (e.statusCode === 404) {
+      await docker.createNetwork({ Name: config.dockerNetwork, Driver: 'bridge' });
+    } else throw e;
+  }
+}
+
+async function runContainer(p) {
+  await ensureNetwork();
+  await removeContainer(p.id);
+
+  const host = previewHost(p.id);
+  const userEnv = decryptJson(p.env_enc);
+  // devbox 側の値を最後に置いて上書きされないようにする
+  const env = { ...userEnv, HOST: '0.0.0.0', PORT: String(p.port) };
+  const router = `devbox-${p.id}`;
+
+  const container = await docker.createContainer({
+    name: containerName(p.id),
+    Image: imageName(p.id),
+    Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+    ExposedPorts: { [`${p.port}/tcp`]: {} },
+    Labels: {
+      'devbox.id': p.id,
+      'traefik.enable': 'true',
+      'traefik.docker.network': config.dockerNetwork,
+      [`traefik.http.routers.${router}.rule`]: `Host(\`${host}\`)`,
+      [`traefik.http.routers.${router}.entrypoints`]: config.traefikEntrypoint,
+      [`traefik.http.services.${router}.loadbalancer.server.port`]: String(p.port),
+    },
+    HostConfig: {
+      NetworkMode: config.dockerNetwork,
+      Memory: config.limits.memoryMb * 1024 * 1024,
+      MemorySwap: config.limits.memoryMb * 1024 * 1024, // swap無効
+      NanoCpus: Math.round(config.limits.cpus * 1e9),
+      PidsLimit: config.limits.pids,
+      CapDrop: ['ALL'],
+      SecurityOpt: ['no-new-privileges:true'],
+      Privileged: false,
+      Init: true,
+      RestartPolicy: { Name: 'no' },
+      Ulimits: [{ Name: 'nofile', Soft: 4096, Hard: 4096 }],
+      LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '2' } },
+      ...(config.dockerRuntime ? { Runtime: config.dockerRuntime } : {}),
+    },
+  });
+  await container.start();
+  return container.id;
+}
+
+// ---- 同時稼働数の管理と待機キュー ---------------------------------------------
+const ACTIVE = new Set(['building', 'running']);
+const nowIso = () => new Date().toISOString();
+
+// 自分自身を除いた、ビルド中+実行中のプロジェクト数
+export const activeCount = (excludeId) =>
+  listProjects().filter((p) => ACTIVE.has(p.status) && p.id !== excludeId).length;
+
+// 待機中のプロジェクトを、待ち始めた順に返す
+export function queueOrder() {
+  return listProjects()
+    .filter((p) => p.status === 'queued')
+    .sort((a, b) => String(a.queued_at).localeCompare(String(b.queued_at)));
+}
+
+export function queuePosition(id) {
+  const i = queueOrder().findIndex((p) => p.id === id);
+  return i < 0 ? null : i + 1;
+}
+
+// DNS の削除は失敗してもプロジェクトの状態は進める(取り残しは定期的な掃除で消える)
+async function safeDeleteDns(id) {
+  if (!dnsEnabled()) return;
+  try {
+    await deletePreviewRecord(previewHost(id));
+  } catch (e) {
+    appendLog(id, `DNS レコードの削除に失敗しました(あとで自動で掃除されます): ${e.message}`);
+  }
+}
+
+// ---- 公開API ----------------------------------------------------------------
+
+// 起動の依頼。上限に達していれば「待機中」にする
+export function startProject(id) {
+  const p = getProject(id);
+  if (!p) throw new Error('not found');
+  if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
+  if (p.status === 'queued') return; // すでに順番待ち
+  if (activeCount(id) >= config.maxRunning) {
+    updateProject(id, { status: 'queued', error: null, queued_at: nowIso() });
+    resetLog(id);
+    appendLog(id, `==> 同時稼働数の上限(${config.maxRunning})に達しているため、順番待ちです`);
+    return;
+  }
+  launch(id);
+}
+
+// 空きができたら、待機中のものを順番に起動する
+export function drainQueue() {
+  for (const q of queueOrder()) {
+    if (busy.has(q.id)) continue;
+    if (activeCount(q.id) >= config.maxRunning) break;
+    launch(q.id);
+  }
+}
+
+// ビルド→DNS作成→起動を非同期で実行 (呼び出し側は待たない)
+function launch(id) {
+  busy.add(id);
+  updateProject(id, { status: 'building', error: null, queued_at: null });
+  resetLog(id);
+
+  (async () => {
+    const p = getProject(id);
+    const dir = path.join(config.dataDir, 'work', id);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir + '.home', { recursive: true });
+    let slot = false;
+    try {
+      appendLog(id, '==> ビルド待機中...');
+      await acquireBuildSlot();
+      slot = true;
+      await cloneRepo(p, dir);
+      const dockerfile = pickDockerfile(p, dir);
+      await buildImage(p, dir, dockerfile);
+      if (dnsEnabled()) {
+        appendLog(id, `==> DNS レコードを作成: ${previewHost(id)}`);
+        await createPreviewRecord(previewHost(id));
+      }
+      appendLog(id, '==> コンテナを起動');
+      const containerId = await runContainer(p);
+      updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso() });
+      appendLog(id, `==> 起動しました: ${previewUrl(id)}`);
+    } catch (e) {
+      appendLog(id, `!! 失敗: ${e.message}`);
+      updateProject(id, { status: 'failed', error: e.message.slice(0, 1000), started_at: null });
+      // 失敗したら何も動いていない状態にそろえる
+      try {
+        await removeContainer(id);
+      } catch {
+        /* 後続の掃除に任せる */
+      }
+      await safeDeleteDns(id);
+    } finally {
+      if (slot) releaseBuildSlot();
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(dir + '.home', { recursive: true, force: true });
+      busy.delete(id);
+      drainQueue();
+    }
+  })();
+}
+
+export async function stopProject(id) {
+  const p = getProject(id);
+  if (!p) throw new Error('not found');
+  if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
+  if (p.status === 'queued') {
+    updateProject(id, { status: 'stopped', queued_at: null });
+    return;
+  }
+  busy.add(id);
+  try {
+    await removeContainer(id);
+    await safeDeleteDns(id);
+    updateProject(id, { status: 'stopped', container_id: null, started_at: null });
+  } finally {
+    busy.delete(id);
+  }
+  drainQueue();
+}
+
+export async function deleteProjectResources(id) {
+  if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
+  busy.add(id);
+  try {
+    await removeContainer(id);
+    await safeDeleteDns(id);
+    try {
+      await docker.getImage(imageName(id)).remove({ force: true });
+    } catch (e) {
+      if (e.statusCode !== 404) throw e;
+    }
+  } finally {
+    busy.delete(id);
+  }
+}
+
+// 実行中コンテナの末尾ログ
+export async function runtimeLogs(id, tail = 300) {
+  try {
+    const buf = await docker.getContainer(containerName(id)).logs({
+      stdout: true,
+      stderr: true,
+      tail,
+      timestamps: false,
+    });
+    return demux(buf);
+  } catch (e) {
+    if (e.statusCode === 404) return '(コンテナは存在しません)';
+    throw e;
+  }
+}
+
+// Docker の多重化ログ(8バイトヘッダ)を平文にする
+function demux(buf) {
+  if (!Buffer.isBuffer(buf)) return String(buf);
+  const out = [];
+  let i = 0;
+  while (i + 8 <= buf.length) {
+    const len = buf.readUInt32BE(i + 4);
+    out.push(buf.subarray(i + 8, i + 8 + len).toString('utf8'));
+    i += 8 + len;
+  }
+  return out.join('');
+}
+
+// 動いていないプロジェクトの DNS レコードを消す(devbox が作った印のあるものだけ)
+export async function sweepDns() {
+  if (!dnsEnabled()) return;
+  try {
+    const keep = listProjects().filter((p) => ACTIVE.has(p.status)).map((p) => p.id);
+    const n = await sweepOrphans(keep);
+    if (n > 0) console.log(`[dns] 取り残しのレコードを ${n} 件削除しました`);
+  } catch (e) {
+    console.warn(`[dns] 掃除に失敗しました: ${e.message}`);
+  }
+}
+
+// 起動時に DB と Docker の実状態を突き合わせる
+export async function reconcile() {
+  let running = new Set();
+  try {
+    const list = await docker.listContainers({ all: true, filters: { label: ['devbox.id'] } });
+    running = new Set(list.filter((c) => c.State === 'running').map((c) => c.Labels['devbox.id']));
+  } catch (e) {
+    console.warn(`[reconcile] Docker に接続できません: ${e.message}`);
+    return;
+  }
+  for (const p of listProjects()) {
+    if (p.status === 'building') {
+      updateProject(p.id, { status: 'failed', error: 'サーバー再起動によりビルドが中断されました', started_at: null });
+    } else if (p.status === 'running' && !running.has(p.id)) {
+      updateProject(p.id, { status: 'stopped', container_id: null, started_at: null });
+    }
+  }
+  await sweepDns();
+  drainQueue();
+}
+
+// 最大稼働時間を超えたものを自動停止 / DNS の取り残しを定期的に掃除
+export function startReaper() {
+  if (config.maxRuntimeHours) {
+    setInterval(async () => {
+      const limitMs = config.maxRuntimeHours * 3600 * 1000;
+      for (const p of listProjects()) {
+        if (p.status !== 'running' || !p.started_at || busy.has(p.id)) continue;
+        if (Date.now() - Date.parse(p.started_at) <= limitMs) continue;
+        try {
+          appendLog(p.id, `==> 最大稼働時間(${config.maxRuntimeHours}時間)を超えたため停止します`);
+          await stopProject(p.id);
+        } catch (e) {
+          console.warn(`[reaper] ${p.id} を停止できません: ${e.message}`);
+        }
+      }
+    }, 60_000).unref();
+  }
+  if (dnsEnabled()) setInterval(sweepDns, 30 * 60_000).unref();
+}
+
+export async function dockerPing() {
+  try {
+    await docker.ping();
+    return true;
+  } catch {
+    return false;
+  }
+}

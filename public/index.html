@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>devbox</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --line: #2b3040;
+    --text: #e8eaf0; --muted: #8b93a7;
+    --purple: #a78bfa; --blue: #60a5fa; --cyan: #22d3ee; --green: #4ade80;
+    --orange: #fb923c; --pink: #f472b6; --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; line-height: 1.5; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 20px; letter-spacing: .5px;
+    background: linear-gradient(90deg, var(--purple), var(--cyan), var(--green));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; font: inherit; }
+  textarea { font-family: ui-monospace, Menlo, monospace; font-size: 13px; min-height: 90px; resize: vertical; }
+  input:focus, textarea:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  .row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } header, main { padding: 14px; } }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 12px; cursor: pointer; font: inherit; font-size: 13px; }
+  button:hover { border-color: var(--blue); }
+  button.primary { background: linear-gradient(90deg, var(--purple), var(--blue)); border: 0; color: #0b0d12; font-weight: 600; }
+  button.danger:hover { border-color: var(--red); color: var(--red); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .proj-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; justify-content: space-between; }
+  .proj-name { font-weight: 600; font-size: 16px; }
+  .meta { color: var(--muted); font-size: 13px; word-break: break-all; }
+  .badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; }
+  .s-running { color: var(--green); } .s-building { color: var(--orange); }
+  .s-failed { color: var(--red); } .s-stopped, .s-created { color: var(--muted); }
+  .s-queued { color: var(--purple); }
+  .info { color: var(--muted); font-size: 13px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  a.preview { color: var(--cyan); text-decoration: none; font-size: 14px; }
+  a.preview:hover { text-decoration: underline; }
+  pre.log { margin: 12px 0 0; background: #0a0c11; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .err { color: var(--red); font-size: 13px; margin-top: 8px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .empty { color: var(--muted); text-align: center; padding: 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>devbox</h1>
+  <div style="display:flex;gap:12px;align-items:center"><span class="info" id="info"></span><button id="logout" hidden>ログアウト</button></div>
+</header>
+<main>
+  <section class="card" id="login" hidden>
+    <strong>管理トークンを入力</strong>
+    <label for="token">ADMIN_TOKEN</label>
+    <input id="token" type="password" autocomplete="off">
+    <div class="actions"><button class="primary" id="login-btn">ログイン</button></div>
+    <div class="err" id="login-err"></div>
+  </section>
+
+  <section class="card" id="create" hidden>
+    <strong>新しい開発サーバー</strong>
+    <div class="row">
+      <div><label>名前</label><input id="f-name" maxlength="40" placeholder="my-app"></div>
+      <div><label>ブランチ</label><input id="f-branch" value="main"></div>
+      <div><label>ポート(アプリが待ち受ける)</label><input id="f-port" type="number" value="3000"></div>
+    </div>
+    <label>リポジトリURL</label>
+    <input id="f-repo" placeholder="https://github.com/owner/repo">
+    <label>環境変数 (1行に KEY=VALUE)</label>
+    <textarea id="f-env" placeholder="DATABASE_URL=...&#10;API_KEY=..."></textarea>
+    <div class="hint">PORT / HOST は devbox が設定します。値は暗号化して保存され、画面には表示されません。</div>
+    <div class="actions"><button class="primary" id="create-btn">作成して起動</button></div>
+    <div class="err" id="create-err"></div>
+  </section>
+
+  <section id="list" hidden></section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = sessionStorage.getItem('devbox_token') || '';
+const openLogs = new Map(); // id -> { type, offset, text }
+
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (res.status === 401) { showLogin('トークンが正しくありません'); throw new Error('unauthorized'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function parseEnv(text) {
+  const env = {};
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const i = line.indexOf('=');
+    if (i < 1) throw new Error(`環境変数の形式が不正です: ${line.slice(0, 30)}`);
+    env[line.slice(0, i).trim()] = line.slice(i + 1);
+  }
+  return env;
+}
+
+function showLogin(msg = '') {
+  $('login').hidden = false; $('create').hidden = true; $('list').hidden = true; $('logout').hidden = true;
+  $('login-err').textContent = msg;
+}
+
+async function boot() {
+  if (!token) return showLogin();
+  try { await refresh(); } catch { return; }
+  $('login').hidden = true; $('create').hidden = false; $('list').hidden = false; $('logout').hidden = false;
+}
+
+$('login-btn').onclick = () => { token = $('token').value.trim(); sessionStorage.setItem('devbox_token', token); boot(); };
+$('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('login-btn').click(); });
+$('logout').onclick = () => { sessionStorage.removeItem('devbox_token'); token = ''; location.reload(); };
+
+$('create-btn').onclick = async () => {
+  $('create-err').textContent = '';
+  try {
+    const p = await api('/projects', { method: 'POST', body: {
+      name: $('f-name').value, repoUrl: $('f-repo').value, branch: $('f-branch').value,
+      port: $('f-port').value, env: parseEnv($('f-env').value),
+    }});
+    $('f-name').value = ''; $('f-repo').value = ''; $('f-env').value = '';
+    openLogs.set(p.id, { type: 'build', offset: 0, text: '' });
+    await refresh();
+  } catch (e) { $('create-err').textContent = e.message; }
+};
+
+async function act(id, fn) {
+  try { await fn(); } catch (e) { alert(e.message); }
+  await refresh();
+}
+
+function render(projects) {
+  const list = $('list');
+  list.replaceChildren();
+  if (projects.length === 0) { list.append(el('div', { class: 'card empty' }, 'まだプロジェクトがありません')); return; }
+  list.style.display = 'grid'; list.style.gap = '14px';
+  for (const p of projects) {
+    const logState = openLogs.get(p.id);
+    const logBox = el('pre', { class: 'log', id: 'log-' + p.id, hidden: !logState }, logState?.text || '');
+    list.append(el('div', { class: 'card' },
+      el('div', { class: 'proj-head' },
+        el('div', {},
+          el('div', { class: 'proj-name' }, p.name),
+          el('div', { class: 'meta' }, `${p.repoUrl} @ ${p.branch} : ${p.port}`)),
+        el('span', { class: 'badge s-' + p.status }, { created: '未起動', queued: p.queuePosition ? `待機中 (${p.queuePosition}番目)` : '待機中', building: 'ビルド中', running: '実行中', stopped: '停止', failed: '失敗' }[p.status] || p.status)),
+      p.status === 'running' ? el('div', { style: 'margin-top:8px' }, el('a', { class: 'preview', href: p.previewUrl, target: '_blank', rel: 'noopener noreferrer' }, p.previewUrl)) : '',
+      p.envKeys.length ? el('div', { class: 'hint' }, 'env: ' + p.envKeys.join(', ')) : '',
+      p.error ? el('div', { class: 'err' }, p.error) : '',
+      el('div', { class: 'actions' },
+        el('button', { disabled: p.busy || p.status === 'building' || p.status === 'queued', onclick: () => act(p.id, async () => { await api(`/projects/${p.id}/start`, { method: 'POST' }); openLogs.set(p.id, { type: 'build', offset: 0, text: '' }); }) }, p.status === 'running' ? '再ビルド' : '起動'),
+        el('button', { disabled: !(p.status === 'running' || p.status === 'queued') || p.busy, onclick: () => act(p.id, () => api(`/projects/${p.id}/stop`, { method: 'POST' })) }, p.status === 'queued' ? '待機をやめる' : '停止'),
+        el('button', { onclick: () => { openLogs.set(p.id, { type: 'build', offset: 0, text: '' }); refresh(); } }, 'ビルドログ'),
+        el('button', { disabled: p.status !== 'running', onclick: async () => { const r = await api(`/projects/${p.id}/runtime-log`); openLogs.set(p.id, { type: 'runtime', offset: 0, text: r.text || '(ログなし)' }); refresh(); } }, '実行ログ'),
+        el('button', { disabled: p.busy || p.status === 'building', onclick: () => act(p.id, async () => {
+          const t = prompt('環境変数を全て入力し直してください (KEY=VALUE を改行区切り)。空欄で全削除。\n現在のキー: ' + p.envKeys.join(', '), '');
+          if (t === null) return;
+          await api(`/projects/${p.id}`, { method: 'PATCH', body: { env: parseEnv(t) } });
+          alert('保存しました。反映するには「再ビルド」してください。');
+        }) }, 'env編集'),
+        el('button', { class: 'danger', disabled: p.busy, onclick: () => { if (confirm(`「${p.name}」を削除しますか？`)) act(p.id, () => api(`/projects/${p.id}`, { method: 'DELETE' })); } }, '削除')),
+      logBox));
+  }
+}
+
+let timer = null;
+async function refresh() {
+  const projects = await api('/projects');
+  try {
+    const i = await api('/info');
+    $('info').textContent = `稼働 ${i.active} / ${i.maxRunning}` + (i.maxRuntimeHours ? ` ・ 最大${i.maxRuntimeHours}時間で自動停止` : '');
+  } catch { /* 情報が取れなくても本体は動かす */ }
+  // ビルドログの差分取得
+  for (const p of projects) {
+    const s = openLogs.get(p.id);
+    if (s && s.type === 'build') {
+      const r = await api(`/projects/${p.id}/build-log?offset=${s.offset}`);
+      s.text += r.text; s.offset = r.offset;
+    }
+  }
+  render(projects);
+  for (const p of projects) { const b = $('log-' + p.id); if (b && !b.hidden) b.scrollTop = b.scrollHeight; }
+  clearTimeout(timer);
+  const active = projects.some((p) => p.status === 'building' || p.status === 'queued' || p.busy);
+  timer = setTimeout(() => refresh().catch(() => {}), active ? 1500 : 8000);
+}
+
+boot();
+</script>
+</body>
+</html>
