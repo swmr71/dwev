@@ -6,6 +6,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "env:sync": "node scripts/env-sync.js",
     "test": "node --test --no-warnings \"test/**/*.test.js\""
   },
   "engines": {
