@@ -40,6 +40,17 @@ test('Django: manage.py があれば migrate してから runserver', () => {
   assert.match(detectRuntime(mk({ 'manage.py': '', 'pyproject.toml': '[project]' })).dockerfile, /pip install --no-cache-dir \./);
 });
 
+test('Python: ビルドに C のライブラリが要るパッケージ(mysqlclient / psycopg2)があるときだけ、apt で入れる', () => {
+  const my = detectRuntime(mk({ 'manage.py': '', 'requirements.txt': 'Django==5.0\nmysqlclient==2.2.8\n' })).dockerfile;
+  assert.match(my, /apt-get install -y --no-install-recommends build-essential pkg-config default-libmysqlclient-dev/);
+  assert.ok(my.indexOf('apt-get install') < my.indexOf('pip install'), 'pip の前に入れる');
+  const pg = detectRuntime(mk({ 'manage.py': '', 'requirements.txt': 'psycopg2==2.9.9\n' })).dockerfile;
+  assert.match(pg, /build-essential libpq-dev/);
+  // psycopg2-binary(ホイールあり)や、関係のない依存では、入れない
+  assert.doesNotMatch(detectRuntime(mk({ 'manage.py': '', 'requirements.txt': 'psycopg2-binary==2.9.9\n' })).dockerfile, /apt-get/);
+  assert.doesNotMatch(detectRuntime(mk({ 'manage.py': '', 'requirements.txt': 'Django==5.0\n' })).dockerfile, /apt-get/);
+});
+
 test('FastAPI / Flask: 依存からの判定と、アプリのモジュール名の検出', () => {
   const fa = detectRuntime(mk({ 'requirements.txt': 'fastapi\n', 'app/main.py': '' }));
   assert.match(fa.dockerfile, /pip install --no-cache-dir uvicorn/);

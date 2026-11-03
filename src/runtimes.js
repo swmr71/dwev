@@ -75,6 +75,14 @@ function python(dir) {
     throw new Error('Python のアプリの種類(Django / FastAPI / Flask)を判定できません。Dockerfile を追加してください');
   }
 
+  // ホイール(ビルド済み)が無くて、ビルドに C のコンパイラやライブラリが要るパッケージは、そのときだけ入れる
+  const apt = new Set();
+  if (has('mysqlclient')) ['build-essential', 'pkg-config', 'default-libmysqlclient-dev'].forEach((x) => apt.add(x));
+  if (has('psycopg2')) ['build-essential', 'libpq-dev'].forEach((x) => apt.add(x)); // psycopg2-binary は不要
+  const aptLine = apt.size
+    ? [`RUN apt-get update && apt-get install -y --no-install-recommends ${[...apt].join(' ')} && rm -rf /var/lib/apt/lists/*`]
+    : [];
+
   const install = exists(dir, 'requirements.txt')
     ? ['COPY requirements.txt ./', 'RUN pip install --no-cache-dir -r requirements.txt']
     : ['COPY . .', 'RUN pip install --no-cache-dir .'];
@@ -84,6 +92,7 @@ function python(dir) {
       'FROM python:3.12-slim',
       'ENV PYTHONUNBUFFERED=1',
       'WORKDIR /app',
+      ...aptLine,
       ...install,
       ...extra,
       'COPY . .',
