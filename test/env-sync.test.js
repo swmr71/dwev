@@ -39,10 +39,12 @@ test('render: 例の構成に、.env の有効な値をはめ込む。説明は�
     '# === 見出し ===',
     '# 説明の行',
     'A=mine',
-    'B=20    # Bの説明',
+    '# Bの説明',
+    'B=20',
     '# C=3',
     '',
-    'MAX=5   # 上限',
+    '# 上限',
+    'MAX=5',
     '',
     '# === .env.example に無い項目(削除済みか、独自の設定) ===',
     'OLD_KEY=keep',
@@ -51,9 +53,9 @@ test('render: 例の構成に、.env の有効な値をはめ込む。説明は�
   assert.deepEqual(unknown, ['OLD_KEY']);
 });
 
-test('render: 同じキーが複数あれば最後の値。値に「 # 」があれば例の説明は足さない。改行コードは .env に合わせる', () => {
-  const { text } = render('# B=2   # 説明\n', 'B=1\nB=3  # 自分のメモ\n', '\r\n');
-  assert.equal(text, 'B=3  # 自分のメモ\r\n');
+test('render: 同じキーが複数あれば最後の値。行末の「 # 」の説明は値に含めない。改行コードは .env に合わせる', () => {
+  const { text } = render('# B=2   # 説明\nC=x\n', 'B=1\nB=3  # 自分のメモ\nC=a#b\n', '\r\n');
+  assert.equal(text, '# 説明\r\nB=3\r\nC=a#b\r\n'); // 「#」が空白なしでつながっている値は、そのまま
 });
 
 test('sync: 組み直し→2回目は何も変わらない。dry-run は書かない。直前の内容を .bak に残す', () => {
@@ -68,7 +70,7 @@ test('sync: 組み直し→2回目は何も変わらない。dry-run は書か�
 
   const r = sync({ examplePath: ex, envPath: env, log: quiet });
   assert.deepEqual(r.missing.map((m) => m.key), ['NEW_REQUIRED']);
-  assert.equal(fs.readFileSync(env, 'utf8'), '# 見出し\nA=secret\nB=9  # 説明\nNEW_REQUIRED=\n');
+  assert.equal(fs.readFileSync(env, 'utf8'), '# 見出し\nA=secret\n# 説明\nB=9\nNEW_REQUIRED=\n');
   assert.equal(fs.readFileSync(env + '.bak', 'utf8'), before);
 
   const again = sync({ examplePath: ex, envPath: env, log: quiet });
@@ -88,9 +90,9 @@ test('実際の .env.example: 値を引き継いで組み直しても、値は1�
   const { text } = render(ex, env);
   const lines = text.split('\n');
   for (const want of ['ADMIN_TOKEN=abc', 'MAX_RUNNING=10', 'GITHUB_CLIENT_SECRET=s3cr#t', 'CUSTOM=1']) {
-    assert.ok(lines.includes(want) || lines.some((l) => l.startsWith(want + ' ')), `${want} が見つからない`);
+    assert.ok(lines.includes(want), `${want} が見つからない`);
   }
-  assert.ok(lines.some((l) => l.startsWith('MAX_RUNTIME_HOURS=8')), '値の入った行が、自動停止の見出しの下に来る');
-  assert.ok(lines.indexOf('# === 自動停止 ===========================================================') < lines.findIndex((l) => l.startsWith('MAX_RUNTIME_HOURS=8')));
+  assert.ok(lines.indexOf('# === 自動停止 ===========================================================') < lines.indexOf('MAX_RUNTIME_HOURS=8'), '値の入った行が、自動停止の見出しの下に来る');
+  assert.ok(!lines.some((l) => /^[A-Z_]+=.*\s#\s/.test(l)), '値の行の後ろに、コメントが付かない');
   assert.equal(render(ex, text).text, text); // もう一度かけても変わらない
 });

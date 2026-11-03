@@ -1,5 +1,6 @@
 // .env を、.env.example の構成に組み直す。実行するたびに、見出し・説明・項目の並びが例と同じになる。
-//   - .env で有効な行(KEY=値)の値は、そのまま引き継ぐ
+//   - .env で有効な行(KEY=値)の値は、そのまま引き継ぐ。行末の「 # 説明」は値に含めない(docker compose と同じ読み方)
+//   - 例に「 # 説明」がある項目は、その説明を行の上に置く(値の後ろには付けない。読み方の違いで値が変わらないように)
 //   - 例に増えた項目は足す(有効な行で値が空・仮の値のものは「値が必要」と表示)
 //   - 例から消えた項目は、末尾に残す(消さない)。.env にだけあったコメントや空行は、組み直しで無くなる
 //   - 変わるときは、直前の内容を .env.bak に残す
@@ -37,12 +38,14 @@ export function diffEnv(exampleText, envText) {
   return { missing, unknown };
 }
 
+const stripNote = (raw) => (INLINE_COMMENT.exec(raw)?.[1] ?? raw).trimEnd();
+
 // .env で有効な行の値(同じキーが複数あれば、最後のもの。docker compose と同じ)
 function activeValues(envText) {
   const vals = new Map();
   for (const line of splitLines(envText)) {
     const m = KEY_LINE.exec(line);
-    if (m && !m[1]) vals.set(m[2], m[3].trimEnd());
+    if (m && !m[1]) vals.set(m[2], stripNote(m[3]));
   }
   return vals;
 }
@@ -56,10 +59,10 @@ export function render(exampleText, envText, eol = '\n') {
     const m = KEY_LINE.exec(line);
     if (m && vals.has(m[2]) && !placed.has(m[2])) {
       placed.add(m[2]);
-      const value = vals.get(m[2]);
-      // 例に「 # 説明」があれば残す(値の側に既にあるときは足さない)
+      // 例に「 # 説明」があれば、行の上に置く
       const note = INLINE_COMMENT.exec(m[3]);
-      out.push(`${m[2]}=${value}${note && !INLINE_COMMENT.test(value) ? note[2] : ''}`);
+      if (note) out.push('# ' + note[2].replace(/^\s+#\s/, ''));
+      out.push(`${m[2]}=${vals.get(m[2])}`);
     } else {
       out.push(line.trimEnd());
     }
