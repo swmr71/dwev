@@ -174,3 +174,19 @@ test('runtimeSecondsLeft: 最大稼働時間までの残り秒数。上限なし
     config.maxRuntimeHours = keep;
   }
 });
+
+test('startDueConfirms: 確認の時刻が来たものに期限を付ける。まだのもの・確認待ちのものには付けない', async () => {
+  const { startDueConfirms } = await import('../src/manager.js');
+  const u = mkUser(9);
+  const due = mkRunning(u.id, { keepalive_at: ago(10.1) });
+  const notYet = mkRunning(u.id, { keepalive_at: ago(9) });
+  const already = mkRunning(u.id, { keepalive_at: ago(12), confirm_deadline_at: ahead(2) });
+  const before = getProject(already.id).confirm_deadline_at;
+  startDueConfirms();
+  const d = getProject(due.id).confirm_deadline_at;
+  assert.ok(d);
+  const left = (Date.parse(d) - Date.now()) / 1000;
+  assert.ok(left > 4 * 60 + 50 && left <= 5 * 60, `猶予 ${left} 秒`);
+  assert.equal(getProject(notYet.id).confirm_deadline_at, null);
+  assert.equal(getProject(already.id).confirm_deadline_at, before); // 期限を延ばさない
+});

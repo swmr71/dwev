@@ -670,17 +670,23 @@ export async function sweepStorage() {
   }
 }
 
+// 確認の時刻が来たものに、期限を付けて確認を始める。時刻ちょうどに画面に出るように、5秒ごとに呼ぶ
+export function startDueConfirms(nowMs = Date.now()) {
+  for (const p of listProjects()) {
+    if (busy.has(p.id) || !confirmDue(p, nowMs)) continue;
+    const deadline = new Date(nowMs + config.keepaliveGraceMinutes * 60_000).toISOString();
+    updateProject(p.id, { confirm_deadline_at: deadline });
+    appendLog(p.id, `==> まだ使っていますか? ${config.keepaliveGraceMinutes}分以内に、devbox の画面で「続ける」を押してください`);
+  }
+}
+
 // 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
 export function startReaper() {
   setInterval(async () => {
     await Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleContainer));
-    for (let p of listProjects()) {
+    startDueConfirms();
+    for (const p of listProjects()) {
       if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
-      if (confirmDue(p)) {
-        const deadline = new Date(Date.now() + config.keepaliveGraceMinutes * 60_000).toISOString();
-        p = updateProject(p.id, { confirm_deadline_at: deadline });
-        appendLog(p.id, `==> まだ使っていますか? ${config.keepaliveGraceMinutes}分以内に、devbox の画面で「続ける」を押してください`);
-      }
       const reason = stopReason(p);
       if (!reason) continue;
       try {
@@ -693,6 +699,7 @@ export function startReaper() {
   }, 60_000).unref();
   if (dnsEnabled()) setInterval(sweepDns, 30 * 60_000).unref();
   setInterval(sweepStorage, 30 * 60_000).unref();
+  if (config.keepaliveMinutes) setInterval(startDueConfirms, 5_000).unref();
 }
 
 export async function dockerPing() {
