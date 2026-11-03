@@ -69,6 +69,14 @@
   .modal button { font-size: 18px; padding: 14px 28px; }
   .modal .actions { justify-content: center; }
   .notify-btn { font-size: 12px; padding: 4px 10px; }
+  /* 設定の編集画面 */
+  .edit-bg { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 90; overflow: auto; }
+  .edit-bg[hidden] { display: none; }
+  .edit-box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; width: 100%; max-width: 560px; }
+  .edit-box h2 { margin: 0 0 12px; font-size: 18px; }
+  .edit-box label.row { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .edit-box label.row input { width: auto; }
+  .edit-box textarea { width: 100%; min-height: 140px; }
   .timers { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
   .timer { font-size: 13px; color: var(--cyan); background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-variant-numeric: tabular-nums; }
   .timer.warn { color: var(--orange); border-color: var(--orange); }
@@ -91,6 +99,26 @@
     <div class="actions">
       <button class="primary" id="confirm-ok" disabled>続ける</button>
       <button id="confirm-stop">停止する</button>
+    </div>
+  </div>
+</div>
+<div class="edit-bg" id="edit-modal" hidden role="dialog" aria-labelledby="edit-title">
+  <div class="edit-box">
+    <h2 id="edit-title">設定を編集: <span id="edit-name"></span></h2>
+    <div class="grid3" style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+      <div><label for="edit-branch">ブランチ</label><input id="edit-branch"></div>
+      <div><label for="edit-port">ポート(アプリが待ち受ける)</label><input id="edit-port" type="number" min="1" max="65535"></div>
+    </div>
+    <label for="edit-env" style="display:block;margin-top:12px">環境変数 (1行に KEY=VALUE。改行できます)</label>
+    <textarea id="edit-env" placeholder="DATABASE_URL=sqlite:///db.sqlite3&#10;SECRET_KEY=..." autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+    <div class="hint" id="edit-keys"></div>
+    <label class="row"><input type="checkbox" id="edit-merge" checked> 今ある環境変数を残して、ここに書いたものを追加・上書きする</label>
+    <label class="row"><input type="checkbox" id="edit-wipe"> 環境変数を全て削除する(上の欄は使いません)</label>
+    <div class="hint">保存すると、次の「起動」はビルドからやり直しになります(書き込んだデータは消えます)。</div>
+    <div class="err" id="edit-err"></div>
+    <div class="actions" style="display:flex;gap:10px;margin-top:12px">
+      <button class="primary" id="edit-save">保存</button>
+      <button id="edit-cancel">キャンセル</button>
     </div>
   </div>
 </div>
@@ -326,6 +354,42 @@ function tickTimers() {
 }
 setInterval(tickTimers, 1000);
 
+// ---- 設定の編集(ブランチ・ポート・環境変数) --------------------------------------
+let editing = null;
+function openEdit(p) {
+  editing = p;
+  $('edit-name').textContent = p.name;
+  $('edit-branch').value = p.branch;
+  $('edit-port').value = p.port;
+  $('edit-env').value = '';
+  $('edit-keys').textContent = p.envKeys.length ? '今あるキー: ' + p.envKeys.join(', ') + '(値は表示されません)' : '環境変数は、まだありません';
+  $('edit-merge').checked = true;
+  $('edit-wipe').checked = false;
+  $('edit-err').textContent = '';
+  $('edit-modal').hidden = false;
+}
+const closeEdit = () => { $('edit-modal').hidden = true; editing = null; };
+$('edit-cancel').onclick = closeEdit;
+$('edit-modal').addEventListener('click', (e) => { if (e.target === $('edit-modal')) closeEdit(); });
+$('edit-save').onclick = async () => {
+  if (!editing) return;
+  $('edit-err').textContent = '';
+  try {
+    const body = {};
+    const branch = $('edit-branch').value.trim();
+    const port = Number($('edit-port').value);
+    if (branch !== editing.branch) body.branch = branch;
+    if (port !== editing.port) body.port = port;
+    const text = $('edit-env').value;
+    if ($('edit-wipe').checked) body.env = {};
+    else if (text.trim()) { body.env = parseEnv(text); body.envMerge = $('edit-merge').checked; }
+    if (Object.keys(body).length === 0) return closeEdit(); // 変更なし
+    await api(`/projects/${editing.id}`, { method: 'PATCH', body });
+    closeEdit();
+    await refresh();
+  } catch (e) { $('edit-err').textContent = e.message; }
+};
+
 // 起動・再ビルドのボタン。rebuild なら、コンテナを作り直す(書き込んだデータが消える)
 function startBtn(p, rebuild, label, warn) {
   return el('button', {
@@ -371,12 +435,7 @@ function render(projects) {
         el('button', { disabled: !(p.status === 'running' || p.status === 'queued') || p.busy, onclick: () => act(p.id, () => api(`/projects/${p.id}/stop`, { method: 'POST' })) }, p.status === 'queued' ? '待機をやめる' : '停止'),
         el('button', { onclick: () => { openLogs.set(p.id, { type: 'build', offset: 0, text: '' }); refresh(); } }, 'ビルドログ'),
         el('button', { disabled: !p.hasContainer, onclick: async () => { const r = await api(`/projects/${p.id}/runtime-log`); openLogs.set(p.id, { type: 'runtime', offset: 0, text: r.text || '(ログなし)' }); refresh(); } }, '実行ログ'),
-        el('button', { disabled: p.busy || p.status === 'building', onclick: () => act(p.id, async () => {
-          const t = prompt('環境変数を全て入力し直してください (KEY=VALUE を改行区切り)。空欄で全削除。\n現在のキー: ' + p.envKeys.join(', '), '');
-          if (t === null) return;
-          await api(`/projects/${p.id}`, { method: 'PATCH', body: { env: parseEnv(t) } });
-          alert('保存しました。反映するには「再ビルド」してください。');
-        }) }, 'env編集'),
+        el('button', { disabled: p.busy || p.status === 'building', onclick: () => openEdit(p) }, '設定編集'),
         el('button', { class: 'danger', disabled: p.busy, onclick: () => { if (confirm(`「${p.name}」を削除しますか？`)) act(p.id, () => api(`/projects/${p.id}`, { method: 'DELETE' })); } }, '削除')),
       logBox));
   }

@@ -163,6 +163,22 @@ test('patch updates fields and re-encrypts env', async () => {
   assert.equal(bad.status, 400);
 });
 
+test('patch: envMerge なら、今ある環境変数を残して、渡したものだけを追加・上書きする', async () => {
+  const url = `/api/projects/${aliceProject}`;
+  const r = await call('PATCH', url, { env: { B: 'changed', C: '3' }, envMerge: true }, alice.headers);
+  assert.equal(r.status, 200);
+  assert.deepEqual((await r.json()).envKeys, ['A', 'B', 'C']);
+  assert.deepEqual(decryptJson(getProject(aliceProject).env_enc), { A: '1', B: 'changed', C: '3' });
+  // envMerge が無ければ、これまでどおり全て置き換え
+  const replaced = await call('PATCH', url, { env: { A: '1', B: '2' } }, alice.headers);
+  assert.deepEqual((await replaced.json()).envKeys, ['A', 'B']);
+  assert.deepEqual(decryptJson(getProject(aliceProject).env_enc), { A: '1', B: '2' });
+  // 追加した結果が不正(個数の上限など)なら、400
+  const many = Object.fromEntries(Array.from({ length: 49 }, (_, i) => [`K${i}`, 'x']));
+  assert.equal((await call('PATCH', url, { env: many, envMerge: true }, alice.headers)).status, 400);
+  assert.deepEqual(decryptJson(getProject(aliceProject).env_enc), { A: '1', B: '2' }); // 変わっていない
+});
+
 test('他人のプロジェクトは、一覧に出ず、見ることも操作することもできない(404)', async () => {
   const mine = await (await call('GET', '/api/projects', null, bob.headers)).json();
   assert.deepEqual(mine, [], 'bob の一覧に alice のものは出ない');

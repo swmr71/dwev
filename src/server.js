@@ -170,7 +170,16 @@ api.patch('/projects/:id', ...guard, load, (req, res) => {
   if (b.name !== undefined) fields.name = validateName(b.name);
   if (b.branch !== undefined) fields.branch = validateBranch(b.branch);
   if (b.port !== undefined) fields.port = validatePort(b.port);
-  if (b.env !== undefined) fields.env_enc = encryptJson(validateEnv(b.env));
+  if (b.env !== undefined) {
+    let env = validateEnv(b.env);
+    // envMerge: 今ある環境変数を残して、渡したものだけを追加・上書きする(値は画面に出さないので、全部を打ち直さなくてよい)
+    if (b.envMerge === true) {
+      let current = {};
+      try { current = decryptJson(req.project.env_enc); } catch { /* 復号できなければ、空から */ }
+      env = validateEnv({ ...current, ...env });
+    }
+    fields.env_enc = encryptJson(env);
+  }
   // コンテナは作ったときの設定のままなので、変えたら次の起動はビルドからにする
   if (b.branch !== undefined || b.port !== undefined || b.env !== undefined) fields.dirty = 1;
   res.json(present(updateProject(req.project.id, fields)));
