@@ -3,3 +3,4 @@ data/
 .env
 cloudflared/*.json
 cloudflared/config.yml
+.env.bak

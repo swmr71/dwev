@@ -16,9 +16,10 @@ cp .env.example .env     # ADMIN_TOKEN と PREVIEW_HOST_TEMPLATE などを編集
 docker compose up -d --build
 ```
 
-`.env.example` に項目が増えたあとは、`.env` を作り直さず `npm run env:sync` で、足りない項目だけを `.env` の末尾に足せます
-(既存の行は変えません。`-- --dry-run` で、足さずに確認だけできます)。
-ホストに Node が無いとき(DockerV など)は、Docker 経由で動く `sh scripts/env-sync.sh`(`--dry-run` も同じ)を使います。
+`.env.example` が更新されたあとは、`npm run env:sync` で `.env` を組み直せます。`.env` の有効な値はそのまま引き継ぎ、
+見出し・説明・項目の並びを `.env.example` と同じにして、増えた項目を足します(`.env.example` に無くなった項目は、末尾に残します)。
+`.env` にだけあったコメントや空行は組み直しで無くなりますが、直前の内容は `.env.bak` に残ります。
+`-- --dry-run` で、書かずに確認だけできます。ホストに Node が無いとき(DockerV など)は、Docker 経由で動く `sh scripts/env-sync.sh` を使います。
 
 `TRAEFIK_PORT` (既定 8080) を Cloudflare Tunnel の転送先 (`http://<このホスト>:8080`) に指定します。
 ワイルドカード用に、`*-dev.clusters-prj.com` のようなホスト名をトンネルへ流す設定が別途必要です。
