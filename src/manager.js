@@ -723,7 +723,7 @@ export function startDueConfirms(nowMs = Date.now()) {
     if (busy.has(p.id) || !confirmDue(p, nowMs)) continue;
     const deadline = new Date(nowMs + config.keepaliveGraceMinutes * 60_000).toISOString();
     updateProject(p.id, { confirm_deadline_at: deadline });
-    appendLog(p.id, `==> まだ使っていますか? ${config.keepaliveGraceMinutes}分以内に、devbox の画面で「続ける」を押してください`);
+    appendLog(p.id, `==> まだ使っていますか? ${config.keepaliveGraceMinutes}分以内に、dwev の画面で「続ける」を押してください`);
   }
 }
 

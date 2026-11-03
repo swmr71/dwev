@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>devbox</title>
+<title>dwev</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --line: #2b3040;
@@ -83,6 +83,21 @@
   /* 広告を出すときの場所。今は空 */
   .ad-slot { min-height: 0; margin: 10px 0; }
   .modal .actions { display: flex; gap: 10px; margin-top: 12px; }
+  /* ログイン前のページ */
+  .landing { padding: 28px 24px; }
+  .lp-title { margin: 0 0 8px; font-size: 24px; line-height: 1.35; }
+  .lp-lead { margin: 0 0 18px; color: var(--muted); }
+  .landing .actions { margin-top: 0; }
+  .lp-steps { list-style: none; counter-reset: step; margin: 26px 0 0; padding: 0; display: grid; gap: 12px; }
+  .lp-steps li { counter-increment: step; display: grid; grid-template-columns: 28px 1fr; column-gap: 12px; align-items: start; }
+  .lp-steps li::before { content: counter(step); grid-row: span 2; width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #0b0d12;
+    background: linear-gradient(135deg, var(--purple), var(--cyan)); }
+  .lp-steps b { font-size: 15px; }
+  .lp-steps span { color: var(--muted); font-size: 13px; }
+  .lp-steps code { font-size: 12px; }
+  .lp-notes { margin: 24px 0 0; padding: 14px 16px 14px 32px; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 10px; color: var(--muted); font-size: 13px; display: grid; gap: 4px; }
 </style>
 </head>
 <body>
@@ -123,7 +138,7 @@
   </div>
 </div>
 <header>
-  <h1>devbox</h1>
+  <h1>dwev</h1>
   <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <span class="info" id="info"></span>
     <button class="notify-btn" id="notify-btn" hidden title="確認が出たときに、別のタブを見ていても、デスクトップ通知でお知らせします">🔔 通知をオンにする</button>
@@ -132,11 +147,24 @@
   </div>
 </header>
 <main>
-  <section class="card" id="login" hidden>
-    <strong>devbox へようこそ</strong>
-    <p class="meta">GitHub のリポジトリとブランチを指定すると、開発用のサーバーが立ち上がって、プレビューのURLが発行されます。</p>
+  <section class="card landing" id="login" hidden>
+    <h2 class="lp-title">GitHub のリポジトリを、URL ひとつで動かす</h2>
+    <p class="lp-lead">リポジトリとブランチを指定するだけで、開発用のサーバーが立ち上がり、友だちにも見せられるプレビューURLが発行されます。</p>
     <div class="actions"><a class="btn" href="/auth/github">GitHub でログイン</a></div>
-    <div class="hint">ログインに使うのは、GitHub のユーザー名とアイコンだけです。リポジトリへのアクセス権は求めません。</div>
+    <div class="hint">ログインに使うのは、GitHub のユーザー名とアイコンだけです。</div>
+
+    <ol class="lp-steps">
+      <li><b>ログイン</b><span>GitHub のアカウントでログインします。初めての人は、管理者の承認を待ちます。</span></li>
+      <li><b>リポジトリを指定</b><span>URL、ブランチ、ポートを入れて「作成して起動」。Dockerfile が無くても、Node / Django / FastAPI / Flask は自動で判定します。</span></li>
+      <li><b>プレビューを開く</b><span>ビルドが終わると、<code>https://〜-dev.…</code> のURLで開けます。</span></li>
+    </ol>
+
+    <ul class="lp-notes">
+      <li>プライベートリポジトリも、GitHub App で許可したものだけ読み取れます(読み取りのみ)。</li>
+      <li>使い続けているかを、一定時間ごとに確認します。応答がないと、自動で停止します。</li>
+      <li>停止しても、書き込んだデータは残ります。再ビルドや設定変更をすると消えます。</li>
+      <li>実行できる数と、メモリ・CPU は、制限されています。</li>
+    </ul>
   </section>
 
   <section class="card notice" id="gate" hidden>
@@ -156,7 +184,7 @@
     <div class="hint" id="private-hint" hidden></div>
     <label>環境変数 (1行に KEY=VALUE)</label>
     <textarea id="f-env" placeholder="DATABASE_URL=...&#10;API_KEY=..."></textarea>
-    <div class="hint">PORT / HOST は devbox が設定します。値は暗号化して保存され、画面には表示されません。</div>
+    <div class="hint">PORT / HOST は dwev が設定します。値は暗号化して保存され、画面には表示されません。</div>
     <div class="actions"><button class="primary" id="create-btn">作成して起動</button></div>
     <div class="err" id="create-err"></div>
   </section>
@@ -227,7 +255,7 @@ function showPrivateHint() {
     box.append(' ');
     box.append(el('a', { href: '#', onclick: async (e) => {
       e.preventDefault();
-      if (!confirm('devbox が保存している GitHub の権限を消します。プライベートリポジトリは使えなくなります。')) return;
+      if (!confirm('dwev が保存している GitHub の権限を消します。プライベートリポジトリは使えなくなります。')) return;
       await api('/me/github/disconnect', { method: 'POST' });
       me.privateRepos.connected = false;
       showPrivateHint();

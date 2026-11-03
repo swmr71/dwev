@@ -142,7 +142,7 @@ const page = (res, status, message) =>
     .type('html')
     .send(
       `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-        `<title>devbox</title><body style="font-family:system-ui,sans-serif;background:#0f1117;color:#e8eaf0;padding:40px">` +
+        `<title>dwev</title><body style="font-family:system-ui,sans-serif;background:#0f1117;color:#e8eaf0;padding:40px">` +
         `<p>${message}</p><p><a style="color:#60a5fa" href="/">トップへ戻る</a></p></body>`
     );
 

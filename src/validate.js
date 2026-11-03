@@ -51,7 +51,7 @@ export function validateEnv(env) {
   const out = {};
   for (const [k, v] of entries) {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(k)) fail(`env のキー名が不正です: ${k}`);
-    if (RESERVED_ENV.has(k)) fail(`${k} は devbox が設定するため指定できません`);
+    if (RESERVED_ENV.has(k)) fail(`${k} は dwev が設定するため指定できません`);
     if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') {
       fail(`env ${k} の値は文字列で指定してください`);
     }
