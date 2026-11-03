@@ -183,3 +183,23 @@ test('reconcile: 実行中のはずが止まっていても、コンテナが残
   assert.equal(getProject(gone.id).container_id, null);
   assert.equal(getProject(stale.id).container_id, null); // 外で消されたコンテナは、再開できない
 });
+
+test('enforceStops: 最大稼働時間を超えたものを止める(コンテナは残す)。超えていないものは止めない', async () => {
+  const { enforceStops } = await import('../src/manager.js');
+  const d = fakeDocker();
+  setDockerForTest(d);
+  const keep = config.maxRuntimeHours;
+  config.maxRuntimeHours = 1;
+  try {
+    const over = mk({ status: 'running', container_id: 'c-over', started_at: new Date(Date.now() - 61 * 60_000).toISOString() });
+    const fine = mk({ status: 'running', container_id: 'c-fine', started_at: new Date(Date.now() - 10 * 60_000).toISOString() });
+    await enforceStops();
+    assert.equal(getProject(over.id).status, 'stopped');
+    assert.equal(getProject(over.id).container_id, 'c-over');
+    assert.equal(getProject(fine.id).status, 'running');
+    assert.deepEqual(d.calls.filter((c) => c[0] === 'stop').map((c) => c[1]), [`devbox-${over.id}`]);
+    assert.ok(!d.calls.some((c) => c[0] === 'remove'));
+  } finally {
+    config.maxRuntimeHours = keep;
+  }
+});

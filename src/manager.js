@@ -681,9 +681,12 @@ export function startDueConfirms(nowMs = Date.now()) {
 }
 
 // 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
-export function startReaper() {
-  setInterval(async () => {
-    await Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleContainer));
+// 確認を始める・止めるべきものを止める。表示のタイマーが 0:00 になったとき、ちょうど動くように、5秒ごとに呼ぶ
+let enforcing = false;
+export async function enforceStops() {
+  if (enforcing) return; // 前回の停止(docker stop)が長引いているときは、重ねない
+  enforcing = true;
+  try {
     startDueConfirms();
     for (const p of listProjects()) {
       if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
@@ -696,10 +699,17 @@ export function startReaper() {
         console.warn(`[reaper] ${p.id} を停止できません: ${e.message}`);
       }
     }
-  }, 60_000).unref();
+  } finally {
+    enforcing = false;
+  }
+}
+
+// 5秒ごとに停止の判定、1分ごとに計測(通信量・CPU時間)、30分ごとに掃除
+export function startReaper() {
+  setInterval(enforceStops, 5_000).unref();
+  setInterval(() => Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleContainer)), 60_000).unref();
   if (dnsEnabled()) setInterval(sweepDns, 30 * 60_000).unref();
   setInterval(sweepStorage, 30 * 60_000).unref();
-  if (config.keepaliveMinutes) setInterval(startDueConfirms, 5_000).unref();
 }
 
 export async function dockerPing() {
