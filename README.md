@@ -18,6 +18,7 @@ docker compose up -d --build
 
 `.env.example` に項目が増えたあとは、`.env` を作り直さず `npm run env:sync` で、足りない項目だけを `.env` の末尾に足せます
 (既存の行は変えません。`-- --dry-run` で、足さずに確認だけできます)。
+ホストに Node が無いとき(DockerV など)は、Docker 経由で動く `sh scripts/env-sync.sh`(`--dry-run` も同じ)を使います。
 
 `TRAEFIK_PORT` (既定 8080) を Cloudflare Tunnel の転送先 (`http://<このホスト>:8080`) に指定します。
 ワイルドカード用に、`*-dev.clusters-prj.com` のようなホスト名をトンネルへ流す設定が別途必要です。
