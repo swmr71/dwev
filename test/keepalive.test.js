@@ -157,3 +157,20 @@ test('API: /info は、確認の設定と Turnstile のサイトキー(秘密鍵
   assert.equal(info.turnstileSiteKey, 'site');
   assert.doesNotMatch(JSON.stringify(info), /secret/);
 });
+
+test('runtimeSecondsLeft: 最大稼働時間までの残り秒数。上限なし・動いていなければ null', async () => {
+  const { runtimeSecondsLeft } = await import('../src/manager.js');
+  const u = mkUser(8);
+  const keep = config.maxRuntimeHours;
+  try {
+    config.maxRuntimeHours = 1;
+    const s = runtimeSecondsLeft(mkRunning(u.id, { started_at: ago(15) }));
+    assert.ok(s > 45 * 60 - 5 && s <= 45 * 60, `残り ${s} 秒`);
+    assert.equal(runtimeSecondsLeft(mkRunning(u.id, { started_at: ago(90) })), 0); // 超えていれば 0
+    assert.equal(runtimeSecondsLeft({ ...mkRunning(u.id, { started_at: ago(1) }), status: 'stopped' }), null);
+    config.maxRuntimeHours = 0;
+    assert.equal(runtimeSecondsLeft(mkRunning(u.id, { started_at: ago(1) })), null);
+  } finally {
+    config.maxRuntimeHours = keep;
+  }
+});

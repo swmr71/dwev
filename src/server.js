@@ -13,7 +13,7 @@ import {
 import {
   startProject, stopProject, deleteProjectResources, runtimeLogs, reconcile, dockerPing, previewUrl, isBusy,
   drainQueue, queuePosition, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, stopUserProjects,
-  confirmSecondsLeft, secondsToConfirm, acknowledgeConfirm, ConfirmError, canResume,
+  confirmSecondsLeft, secondsToConfirm, runtimeSecondsLeft, acknowledgeConfirm, ConfirmError, canResume,
 } from './manager.js';
 import { assertDnsConfig, dnsEnabled } from './dns.js';
 import { readLog, removeLog } from './logs.js';
@@ -68,6 +68,7 @@ function present(p) {
     needsRebuild: Boolean(p.dirty && p.container_id && p.status !== 'running'),
     confirmSecondsLeft: confirmSecondsLeft(p),
     secondsToConfirm: secondsToConfirm(p),
+    runtimeSecondsLeft: runtimeSecondsLeft(p),
     queuePosition: p.status === 'queued' ? queuePosition(p.id) : null,
     createdAt: p.created_at,
     updatedAt: p.updated_at,

@@ -567,6 +567,12 @@ export function secondsToConfirm(p, nowMs = Date.now()) {
   return base ? Math.max(0, Math.ceil((base + config.keepaliveMinutes * 60_000 - nowMs) / 1000)) : null;
 }
 
+// 最大稼働時間までの残り秒数(動いていない・上限なしのときは null)
+export function runtimeSecondsLeft(p, nowMs = Date.now()) {
+  if (!config.maxRuntimeHours || p.status !== 'running' || !p.started_at) return null;
+  return Math.max(0, Math.ceil((Date.parse(p.started_at) + config.maxRuntimeHours * 3_600_000 - nowMs) / 1000));
+}
+
 // 確認待ちの残り秒数(確認待ちでなければ null)
 export function confirmSecondsLeft(p, nowMs = Date.now()) {
   if (!config.keepaliveMinutes || p.status !== 'running' || !p.confirm_deadline_at) return null;
