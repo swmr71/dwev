@@ -14,17 +14,20 @@ process.env.TURNSTILE_SITE_KEY = 'site';
 process.env.TURNSTILE_SECRET_KEY = 'secret';
 delete process.env.PUBLIC_URL;
 
-// Turnstile への問い合わせだけ差し替える(トークンが "good" のときだけ成功)
+// Turnstile への問い合わせだけ差し替える。トークンは "ok|ホスト名|action|cdata" の形で、その中身を応答として返す
+// (本物の Turnstile が、ウィジェットに付けた action / cdata と、発行したホスト名を返すのと同じ)
 const realFetch = globalThis.fetch;
 let verifyCalls = 0;
 globalThis.fetch = async (url, init) => {
   if (String(url).startsWith('https://challenges.cloudflare.com/')) {
     verifyCalls++;
-    const ok = new URLSearchParams(init.body).get('response') === 'good';
-    return new Response(JSON.stringify({ success: ok }), { status: 200 });
+    const [kind, hostname, action, cdata] = new URLSearchParams(init.body).get('response').split('|');
+    const body = kind === 'ok' ? { success: true, hostname, action, cdata } : { success: false };
+    return new Response(JSON.stringify(body), { status: 200 });
   }
   return realFetch(url, init);
 };
+const tok = (cdata, over = {}) => ['ok', over.hostname ?? 'devbox.example.com', over.action ?? 'keepalive', cdata].join('|');
 
 const { app } = await import('../src/server.js');
 const { confirmDue, secondsToConfirm, confirmSecondsLeft, acknowledgeConfirm, ConfirmError, stopReason } =
@@ -103,9 +106,22 @@ test('acknowledgeConfirm: 確認を求められている間だけ受け付け、
   assert.throws(() => acknowledgeConfirm(mkRunning(u.id, { confirm_deadline_at: ago(1) }).id), /期限/);
 });
 
-test('verifyHuman: 正しいトークンだけ通す。形が変なものは問い合わせず断る', async () => {
-  assert.equal(await verifyHuman('good'), true);
-  assert.equal(await verifyHuman('bad'), false);
+test('verifyHuman: 正しいトークンだけ通す。ホスト名・action・cdata が違えば断る。形が変なものは問い合わせず断る', async () => {
+  const keepUrl = config.publicUrl;
+  config.publicUrl = 'https://devbox.example.com';
+  try {
+    const exp = { action: 'keepalive', cdata: 'p1' };
+    assert.equal(await verifyHuman(tok('p1'), exp), true);
+    assert.equal(await verifyHuman('bad', exp), false);
+    assert.equal(await verifyHuman(tok('p1', { hostname: 'evil.example.net' }), exp), false); // 別のサイトで取ったトークン
+    assert.equal(await verifyHuman(tok('p1', { action: 'login' }), exp), false); // 別の画面で取ったトークン
+    assert.equal(await verifyHuman(tok('p2'), exp), false); // 別のプロジェクトで取ったトークン
+    // PUBLIC_URL が無ければ、ホスト名は見ない
+    config.publicUrl = '';
+    assert.equal(await verifyHuman(tok('p1', { hostname: 'anything' }), exp), true);
+  } finally {
+    config.publicUrl = keepUrl;
+  }
   const calls = verifyCalls;
   assert.equal(await verifyHuman(undefined), false);
   assert.equal(await verifyHuman(''), false);
@@ -121,7 +137,7 @@ test('verifyHuman: 正しいトークンだけ通す。形が変なものは問�
 test('API: 確認を求められていなければ409。人の確認に失敗すれば400で、確認は進まない', async () => {
   const u = mkUser(4);
   const idle = mkRunning(u.id, { keepalive_at: ago(1) });
-  assert.equal((await post(u, idle.id, { token: 'good' })).status, 409);
+  assert.equal((await post(u, idle.id, { token: tok(idle.id) })).status, 409);
 
   const pending = mkRunning(u.id, { keepalive_at: ago(11), confirm_deadline_at: ahead(4) });
   const bad = await post(u, pending.id, { token: 'bad' });
@@ -130,7 +146,12 @@ test('API: 確認を求められていなければ409。人の確認に失敗す
   assert.equal((await post(u, pending.id, {})).status, 400);
   assert.ok(getProject(pending.id).confirm_deadline_at);
 
-  const ok = await post(u, pending.id, { token: 'good' });
+  // 別のプロジェクトのために取ったトークンは、通らない
+  const other = mkRunning(u.id, { keepalive_at: ago(11), confirm_deadline_at: ahead(4) });
+  assert.equal((await post(u, pending.id, { token: tok(other.id) })).status, 400);
+  assert.ok(getProject(pending.id).confirm_deadline_at);
+
+  const ok = await post(u, pending.id, { token: tok(pending.id) });
   assert.equal(ok.status, 200);
   const body = await ok.json();
   assert.equal(body.confirmSecondsLeft, null);
@@ -141,11 +162,11 @@ test('API: 他人のプロジェクトは404。失敗が続くと429で断る', 
   const owner = mkUser(5);
   const other = mkUser(6);
   const pending = mkRunning(owner.id, { keepalive_at: ago(11), confirm_deadline_at: ahead(4) });
-  assert.equal((await post(other, pending.id, { token: 'good' })).status, 404);
+  assert.equal((await post(other, pending.id, { token: tok(pending.id) })).status, 404);
 
   const calls = verifyCalls;
   for (let i = 0; i < 5; i++) assert.equal((await post(owner, pending.id, { token: 'bad' })).status, 400);
-  assert.equal((await post(owner, pending.id, { token: 'good' })).status, 429); // 正しくても、いったん断る
+  assert.equal((await post(owner, pending.id, { token: tok(pending.id) })).status, 429); // 正しくても、いったん断る
   assert.equal(verifyCalls, calls + 5); // 断った回は、Turnstile に問い合わせない
 });
 

@@ -17,7 +17,7 @@ import {
 } from './manager.js';
 import { assertDnsConfig, dnsEnabled } from './dns.js';
 import { readLog, removeLog } from './logs.js';
-import { verifyHuman, humanCheckEnabled } from './humancheck.js';
+import { verifyHuman, humanCheckEnabled, KEEPALIVE_ACTION } from './humancheck.js';
 import {
   loadUser, requireLogin, requireApproved, adminAuth, sameOriginOnly, authRouter, githubEnabled,
 } from './auth.js';
@@ -176,7 +176,7 @@ api.post('/projects/:id/keepalive', ...guard, load, async (req, res) => {
   if (confirmSecondsLeft(req.project) === null) {
     return res.status(409).json({ error: 'いま確認は求められていません' });
   }
-  if (!(await verifyHuman(req.body?.token))) {
+  if (!(await verifyHuman(req.body?.token, { action: KEEPALIVE_ACTION, cdata: req.project.id }))) {
     const cur = fail && fail.resetAt > Date.now() ? fail : { count: 0, resetAt: Date.now() + 60_000 };
     cur.count++;
     humanFails.set(req.user.id, cur);

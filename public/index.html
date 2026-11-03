@@ -447,7 +447,7 @@ async function showConfirm(p) {
       if (cf.id !== p.id) return;
       $('ts-box').replaceChildren();
       cf.widget = window.turnstile.render('#ts-box', {
-        sitekey: cf.siteKey, theme: 'dark',
+        sitekey: cf.siteKey, theme: 'dark', action: 'keepalive', cData: p.id,
         callback: (t) => { cf.token = t; $('confirm-ok').disabled = false; },
         'expired-callback': () => { cf.token = null; $('confirm-ok').disabled = true; },
       });
