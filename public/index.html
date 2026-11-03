@@ -244,6 +244,20 @@ async function act(id, fn) {
   await refresh();
 }
 
+// 起動・再ビルドのボタン。rebuild なら、コンテナを作り直す(書き込んだデータが消える)
+function startBtn(p, rebuild, label, warn) {
+  return el('button', {
+    disabled: p.busy || p.status === 'building' || p.status === 'queued',
+    onclick: () => {
+      if (warn && !confirm('ビルドからやり直すと、コンテナの中に書き込んだデータが消えます。続けますか?')) return;
+      act(p.id, async () => {
+        await api(`/projects/${p.id}/start`, { method: 'POST', body: { rebuild } });
+        openLogs.set(p.id, { type: 'build', offset: 0, text: '' });
+      });
+    },
+  }, label);
+}
+
 function render(projects) {
   const list = $('list');
   list.replaceChildren();
@@ -261,9 +275,15 @@ function render(projects) {
         el('span', { class: 'badge s-' + p.status }, { created: '未起動', queued: p.queuePosition ? `待機中 (${p.queuePosition}番目)` : '待機中', building: 'ビルド中', running: '実行中', stopped: '停止', failed: '失敗' }[p.status] || p.status)),
       p.status === 'running' ? el('div', { style: 'margin-top:8px' }, el('a', { class: 'preview', href: p.previewUrl, target: '_blank', rel: 'noopener noreferrer' }, p.previewUrl)) : '',
       p.envKeys.length ? el('div', { class: 'hint' }, 'env: ' + p.envKeys.join(', ')) : '',
+      p.resumable ? el('div', { class: 'hint' }, '停止中です。書き込んだデータは残っていて、「起動」でそのまま再開できます(再ビルドすると消えます)') : '',
+      p.needsRebuild ? el('div', { class: 'hint' }, '設定を変えたので、次の起動はビルドからになり、書き込んだデータは消えます') : '',
       p.error ? el('div', { class: 'err' }, p.error) : '',
       el('div', { class: 'actions' },
-        el('button', { disabled: p.busy || p.status === 'building' || p.status === 'queued', onclick: () => act(p.id, async () => { await api(`/projects/${p.id}/start`, { method: 'POST' }); openLogs.set(p.id, { type: 'build', offset: 0, text: '' }); }) }, p.status === 'running' ? '再ビルド' : '起動'),
+        ...(p.status === 'running'
+          ? [startBtn(p, true, '再ビルド', true)]
+          : p.resumable
+            ? [startBtn(p, false, '起動'), startBtn(p, true, '再ビルド', true)]
+            : [startBtn(p, false, p.needsRebuild ? '起動(再ビルド)' : '起動', p.needsRebuild)]),
         el('button', { disabled: !(p.status === 'running' || p.status === 'queued') || p.busy, onclick: () => act(p.id, () => api(`/projects/${p.id}/stop`, { method: 'POST' })) }, p.status === 'queued' ? '待機をやめる' : '停止'),
         el('button', { onclick: () => { openLogs.set(p.id, { type: 'build', offset: 0, text: '' }); refresh(); } }, 'ビルドログ'),
         el('button', { disabled: p.status !== 'running', onclick: async () => { const r = await api(`/projects/${p.id}/runtime-log`); openLogs.set(p.id, { type: 'runtime', offset: 0, text: r.text || '(ログなし)' }); refresh(); } }, '実行ログ'),

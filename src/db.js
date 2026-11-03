@@ -46,7 +46,7 @@ db.exec(`
 // 既存DBへの列追加(待機に入った時刻・稼働開始時刻・持ち主)
 const existingCols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
 for (const col of ['queued_at TEXT', 'started_at TEXT', 'user_id INTEGER', 'last_active_at TEXT', 'cpu_ms INTEGER DEFAULT 0',
-  'keepalive_at TEXT', 'confirm_deadline_at TEXT']) {
+  'keepalive_at TEXT', 'confirm_deadline_at TEXT', 'dirty INTEGER DEFAULT 0']) {
   const name = col.split(' ')[0];
   if (!existingCols.includes(name)) db.exec(`ALTER TABLE projects ADD COLUMN ${col}`);
 }
@@ -84,7 +84,7 @@ export function insertProject(p) {
 
 const COLUMNS = new Set([
   'name', 'branch', 'env_enc', 'port', 'status', 'container_id', 'error', 'queued_at', 'started_at', 'last_active_at', 'cpu_ms',
-  'keepalive_at', 'confirm_deadline_at',
+  'keepalive_at', 'confirm_deadline_at', 'dirty',
 ]);
 
 export function updateProject(id, fields) {

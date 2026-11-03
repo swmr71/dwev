@@ -10,7 +10,11 @@ import { appendLog, resetLog } from './logs.js';
 import { detectRuntime } from './runtimes.js';
 import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
 
-const docker = new Docker(); // /var/run/docker.sock
+let docker = new Docker(); // /var/run/docker.sock
+// テストで Docker の代わりを差し込む
+export function setDockerForTest(d) {
+  docker = d;
+}
 
 export const previewHost = (id) => config.previewHostTemplate.replace('{id}', id);
 export const previewUrl = (id) =>
@@ -147,6 +151,19 @@ async function buildImage(p, dir, dockerfile) {
   });
 }
 
+// 停止だけ行い、コンテナ(と、書き込んだデータ)は残す。すでに止まっていても、無くても、失敗にしない。
+// 戻り値は、コンテナが残っているか
+async function stopContainer(id) {
+  try {
+    await docker.getContainer(containerName(id)).stop({ t: 5 });
+    return true;
+  } catch (e) {
+    if (e.statusCode === 304) return true; // すでに止まっている
+    if (e.statusCode === 404) return false;
+    throw e;
+  }
+}
+
 async function removeContainer(id) {
   try {
     const c = docker.getContainer(containerName(id));
@@ -265,11 +282,13 @@ async function safeDeleteDns(id) {
 // ---- 公開API ----------------------------------------------------------------
 
 // 起動の依頼。上限に達していれば「待機中」にする
-export function startProject(id) {
+// rebuild: true なら、コンテナを作り直す(書き込んだデータは消える)。実行中のものへの依頼は、常に再ビルド。
+export function startProject(id, { rebuild = false } = {}) {
   const p = getProject(id);
   if (!p) throw new Error('not found');
   if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
   if (p.status === 'queued') return; // すでに順番待ち
+  if (rebuild || p.status === 'running') updateProject(id, { dirty: 1 });
   assertRunQuota(p.user_id, id);
   if (activeCount(id) >= config.maxRunning) {
     updateProject(id, { status: 'queued', error: null, queued_at: nowIso() });
@@ -289,6 +308,40 @@ export function drainQueue() {
   }
 }
 
+// 前回のコンテナが残っていて、設定も変えていなければ、ビルドせずにそのまま再開できる
+export const canResume = (p) => p.status !== 'running' && Boolean(p.container_id) && !p.dirty;
+
+// 残っているコンテナを再開する。再開できたら(失敗して停止に戻した場合も)true、コンテナが無くて
+// ビルドからやり直すべきなら false。
+async function resumeContainer(p) {
+  const id = p.id;
+  appendLog(id, '==> 前回のコンテナを再開します(書き込んだデータは残っています)');
+  try {
+    await ensureNetwork();
+    if (dnsEnabled()) {
+      appendLog(id, `==> DNS レコードを作成: ${previewHost(id)}`);
+      await createPreviewRecord(previewHost(id));
+    }
+    await docker.getContainer(containerName(id)).start();
+    const info = await docker.getContainer(containerName(id)).inspect();
+    updateProject(id, { status: 'running', container_id: info.Id, error: null, started_at: nowIso(), last_active_at: nowIso(),
+      keepalive_at: nowIso(), confirm_deadline_at: null });
+    appendLog(id, `==> 再開しました: ${previewUrl(id)}`);
+    return true;
+  } catch (e) {
+    if (e.statusCode === 404) {
+      appendLog(id, '==> コンテナが見つからないため、ビルドからやり直します(データは消えています)');
+      updateProject(id, { container_id: null });
+      return false;
+    }
+    const msg = redact(e.message);
+    appendLog(id, `!! 再開に失敗: ${msg}`);
+    updateProject(id, { status: 'stopped', error: msg.slice(0, 1000), started_at: null });
+    await safeDeleteDns(id);
+    return true;
+  }
+}
+
 // ビルド→DNS作成→起動を非同期で実行 (呼び出し側は待たない)
 function launch(id) {
   busy.add(id);
@@ -297,6 +350,18 @@ function launch(id) {
 
   (async () => {
     const p = getProject(id);
+    if (canResume(p)) {
+      let handled = false;
+      try {
+        handled = await resumeContainer(p);
+      } finally {
+        if (handled) {
+          busy.delete(id);
+          drainQueue();
+        }
+      }
+      if (handled) return;
+    }
     const dir = path.join(config.dataDir, 'work', id);
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir + '.home', { recursive: true });
@@ -315,12 +380,12 @@ function launch(id) {
       appendLog(id, '==> コンテナを起動');
       const containerId = await runContainer(p);
       updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso(), last_active_at: nowIso(),
-        keepalive_at: nowIso(), confirm_deadline_at: null });
+        keepalive_at: nowIso(), confirm_deadline_at: null, dirty: 0 });
       appendLog(id, `==> 起動しました: ${previewUrl(id)}`);
     } catch (e) {
       const msg = redact(e.message);
       appendLog(id, `!! 失敗: ${msg}`);
-      updateProject(id, { status: 'failed', error: msg.slice(0, 1000), started_at: null });
+      updateProject(id, { status: 'failed', error: msg.slice(0, 1000), started_at: null, container_id: null });
       // 失敗したら何も動いていない状態にそろえる
       try {
         await removeContainer(id);
@@ -348,9 +413,9 @@ export async function stopProject(id) {
   }
   busy.add(id);
   try {
-    await removeContainer(id);
+    const kept = await stopContainer(id); // 消さずに止める(次の「起動」で、データのまま再開できる)
     await safeDeleteDns(id);
-    updateProject(id, { status: 'stopped', container_id: null, started_at: null, last_active_at: null, keepalive_at: null, confirm_deadline_at: null });
+    updateProject(id, { status: 'stopped', container_id: kept ? p.container_id : null, started_at: null, last_active_at: null, keepalive_at: null, confirm_deadline_at: null });
     lastRx.delete(id);
     lastCpuNs.delete(id);
   } finally {
@@ -432,9 +497,11 @@ export async function sweepDns() {
 // 起動時に DB と Docker の実状態を突き合わせる
 export async function reconcile() {
   let running = new Set();
+  let existing = new Set();
   try {
     const list = await docker.listContainers({ all: true, filters: { label: ['devbox.id'] } });
     running = new Set(list.filter((c) => c.State === 'running').map((c) => c.Labels['devbox.id']));
+    existing = new Set(list.map((c) => c.Labels['devbox.id']));
   } catch (e) {
     console.warn(`[reconcile] Docker に接続できません: ${e.message}`);
     return;
@@ -443,7 +510,10 @@ export async function reconcile() {
     if (p.status === 'building') {
       updateProject(p.id, { status: 'failed', error: 'サーバー再起動によりビルドが中断されました', started_at: null });
     } else if (p.status === 'running' && !running.has(p.id)) {
-      updateProject(p.id, { status: 'stopped', container_id: null, started_at: null, keepalive_at: null, confirm_deadline_at: null });
+      // コンテナが残っていれば、次の「起動」で再開できるように、そのまま持っておく
+      updateProject(p.id, { status: 'stopped', container_id: existing.has(p.id) ? p.container_id : null, started_at: null, keepalive_at: null, confirm_deadline_at: null });
+    } else if (p.status === 'stopped' && p.container_id && !existing.has(p.id)) {
+      updateProject(p.id, { container_id: null });
     }
   }
   await sweepDns();
@@ -550,6 +620,50 @@ async function sampleContainer(p) {
   }
 }
 
+// ---- 残してあるコンテナ(書き込んだデータ)の掃除 ----------------------------------
+// 停止してもコンテナを消さないので、増え続けないように2つの上限で消す。消すと、次の「起動」はビルドからになる。
+//  - 書き込み層が DATA_LIMIT_MB を超えたもの(動いていれば、止めてから消す)
+//  - 停止してから STOPPED_KEEP_DAYS 日たったもの
+export function storageVerdict(p, sizeRw, nowMs = Date.now()) {
+  if (config.limits.dataLimitMb && sizeRw > config.limits.dataLimitMb * 1024 * 1024) {
+    return `データが上限(${config.limits.dataLimitMb}MB)を超えたため、コンテナを削除しました`;
+  }
+  if (config.limits.stoppedKeepDays && p.status === 'stopped' && nowMs - Date.parse(p.updated_at) > config.limits.stoppedKeepDays * 86_400_000) {
+    return `停止から${config.limits.stoppedKeepDays}日たったため、保存していたデータを削除しました`;
+  }
+  return null;
+}
+
+export async function sweepStorage() {
+  let list;
+  try {
+    list = await docker.listContainers({ all: true, size: true, filters: { label: ['devbox.id'] } });
+  } catch (e) {
+    console.warn(`[sweepStorage] Docker に接続できません: ${e.message}`);
+    return;
+  }
+  for (const c of list) {
+    const id = c.Labels['devbox.id'];
+    const p = getProject(id);
+    if (!p || busy.has(id)) continue;
+    const reason = storageVerdict(p, c.SizeRw || 0);
+    if (!reason) continue;
+    try {
+      appendLog(id, `==> ${reason}`);
+      if (p.status === 'running' || p.status === 'queued') await stopProject(id);
+      busy.add(id);
+      try {
+        await removeContainer(id);
+        updateProject(id, { container_id: null, error: reason });
+      } finally {
+        busy.delete(id);
+      }
+    } catch (e) {
+      console.warn(`[sweepStorage] ${id} を削除できません: ${e.message}`);
+    }
+  }
+}
+
 // 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
 export function startReaper() {
   setInterval(async () => {
@@ -572,6 +686,7 @@ export function startReaper() {
     }
   }, 60_000).unref();
   if (dnsEnabled()) setInterval(sweepDns, 30 * 60_000).unref();
+  setInterval(sweepStorage, 30 * 60_000).unref();
 }
 
 export async function dockerPing() {

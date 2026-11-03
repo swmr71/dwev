@@ -13,7 +13,7 @@ import {
 import {
   startProject, stopProject, deleteProjectResources, runtimeLogs, reconcile, dockerPing, previewUrl, isBusy,
   drainQueue, queuePosition, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, stopUserProjects,
-  confirmSecondsLeft, secondsToConfirm, acknowledgeConfirm, ConfirmError,
+  confirmSecondsLeft, secondsToConfirm, acknowledgeConfirm, ConfirmError, canResume,
 } from './manager.js';
 import { assertDnsConfig, dnsEnabled } from './dns.js';
 import { readLog, removeLog } from './logs.js';
@@ -62,6 +62,10 @@ function present(p) {
     envKeys,
     previewUrl: previewUrl(p.id),
     cpuMs: p.cpu_ms || 0,
+    // 停止中で、前回のコンテナ(書き込んだデータ)が残っている。「起動」でそのまま再開できる
+    resumable: p.status === 'stopped' && canResume(p),
+    // 設定を変えたので、次の起動はビルドからになる(データは消える)
+    needsRebuild: Boolean(p.dirty && p.container_id && p.status !== 'running'),
     confirmSecondsLeft: confirmSecondsLeft(p),
     secondsToConfirm: secondsToConfirm(p),
     queuePosition: p.status === 'queued' ? queuePosition(p.id) : null,
@@ -149,12 +153,14 @@ api.patch('/projects/:id', ...guard, load, (req, res) => {
   if (b.branch !== undefined) fields.branch = validateBranch(b.branch);
   if (b.port !== undefined) fields.port = validatePort(b.port);
   if (b.env !== undefined) fields.env_enc = encryptJson(validateEnv(b.env));
+  // コンテナは作ったときの設定のままなので、変えたら次の起動はビルドからにする
+  if (b.branch !== undefined || b.port !== undefined || b.env !== undefined) fields.dirty = 1;
   res.json(present(updateProject(req.project.id, fields)));
 });
 
 api.post('/projects/:id/start', ...guard, load, (req, res) => {
   if (isBusy(req.project.id)) return res.status(409).json({ error: '処理中です' });
-  startProject(req.project.id);
+  startProject(req.project.id, { rebuild: req.body?.rebuild === true });
   res.status(202).json(present(getProject(req.project.id)));
 });
 
