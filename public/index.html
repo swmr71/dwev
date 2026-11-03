@@ -125,6 +125,7 @@
     </div>
     <label>リポジトリURL</label>
     <input id="f-repo" placeholder="https://github.com/owner/repo">
+    <div class="hint" id="private-hint" hidden></div>
     <label>環境変数 (1行に KEY=VALUE)</label>
     <textarea id="f-env" placeholder="DATABASE_URL=...&#10;API_KEY=..."></textarea>
     <div class="hint">PORT / HOST は devbox が設定します。値は暗号化して保存され、画面には表示されません。</div>
@@ -181,6 +182,32 @@ function parseEnv(text) {
   return env;
 }
 
+// プライベートリポジトリの案内。GitHub App のインストール(使うリポジトリだけを許可)と、ログインのやり直し
+function showPrivateHint() {
+  const box = $('private-hint');
+  const pr = me?.privateRepos;
+  if (!pr || !pr.enabled) { box.hidden = true; return; }
+  box.replaceChildren();
+  box.append('プライベートリポジトリも使えます(読み取りのみ)。');
+  box.append(el('a', { href: pr.installUrl, target: '_blank', rel: 'noopener noreferrer' }, 'GitHub App をインストール'));
+  box.append('して、使うリポジトリだけを許可してください。');
+  if (!pr.connected) {
+    box.append(' まだ権限を受け取っていないので、');
+    box.append(el('a', { href: '/auth/github' }, 'GitHub でログインし直して'));
+    box.append('ください。');
+  } else {
+    box.append(' ');
+    box.append(el('a', { href: '#', onclick: async (e) => {
+      e.preventDefault();
+      if (!confirm('devbox が保存している GitHub の権限を消します。プライベートリポジトリは使えなくなります。')) return;
+      await api('/me/github/disconnect', { method: 'POST' });
+      me.privateRepos.connected = false;
+      showPrivateHint();
+    } }, '連携を解除'));
+  }
+  box.hidden = false;
+}
+
 function show(view) { // view: 'login' | 'gate' | 'app'
   $('login').hidden = view !== 'login';
   $('gate').hidden = view !== 'gate';
@@ -219,6 +246,7 @@ async function boot() {
   setUser(me);
   if (me.status === 'approved') {
     show('app');
+    showPrivateHint();
     try { await refresh(); } catch { /* 401 は api() が処理する */ }
     return;
   }

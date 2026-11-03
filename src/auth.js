@@ -3,6 +3,7 @@ import express from 'express';
 import { config } from './config.js';
 import { safeEqual } from './crypto.js';
 import { upsertGithubUser, createSession, getSessionUser, deleteSession } from './db.js';
+import { saveTokens } from './ghtoken.js';
 
 // ---- Cookie -------------------------------------------------------------------
 // HTTPS のときは「__Host-」付きの名前にする。これは、同じドメインの別ホスト
@@ -102,7 +103,8 @@ async function githubJson(url, init) {
   return r.json();
 }
 
-// 認可コードを GitHub のユーザー情報に換える。GitHub のトークンは、ここで使うだけで保存しない。
+// 認可コードを GitHub のユーザー情報に換える。トークンは、ここで使うほか、プライベートリポジトリ用に
+// 有効にしているときだけ(GITHUB_APP_SLUG)、呼び出し側が暗号化して保存する。
 export async function fetchGithubUser(code) {
   const tok = await githubJson('https://github.com/login/oauth/access_token', {
     method: 'POST',
@@ -129,7 +131,7 @@ export async function fetchGithubUser(code) {
     typeof u.avatar_url === 'string' && u.avatar_url.startsWith('https://avatars.githubusercontent.com/')
       ? u.avatar_url
       : null;
-  return { githubId: u.id, login: u.login, avatarUrl: avatar };
+  return { githubId: u.id, login: u.login, avatarUrl: avatar, tokens: tok };
 }
 
 export const authRouter = express.Router();
@@ -174,6 +176,7 @@ authRouter.get('/github/callback', async (req, res) => {
     return page(res, 502, 'GitHub との通信に失敗しました。しばらくしてからもう一度お試しください。');
   }
   const user = upsertGithubUser(gh);
+  saveTokens(user.id, gh.tokens); // 機能が無効のときは、何も保存しない
   const { token } = createSession(user.id);
   setCookie(res, SESSION_COOKIE, token, config.sessionDays * 86_400);
   res.redirect(302, '/');

@@ -40,7 +40,7 @@ docker compose up -d --build
 
 ## 利用者のログインと承認
 
-利用者は GitHub アカウントでログインします(GitHub には、ユーザー名とアイコンの取得しか求めません。リポジトリへの権限は取りません)。
+利用者は GitHub アカウントでログインします(普通の設定では、GitHub にはユーザー名とアイコンの取得しか求めません。リポジトリへの権限は取りません。プライベートリポジトリを使うときだけ、下の「プライベートリポジトリ」の設定にします)。
 
 - 初めてログインした人は **「承認待ち」** になり、管理者が `/admin/` で承認するまで、何も作れません
 - 1人あたりの上限は、既定で **プロジェクト3件・同時起動1件**(ビルド中・順番待ちも数える)。管理画面から人ごとに変えられます
@@ -60,6 +60,44 @@ docker compose up -d --build
 
    ホスト全体を守ったままだと、利用者がログイン画面まで来られません。逆に、絞り忘れると、管理画面が管理トークンだけで守られる状態になります。
 5. 自分自身も、一度 GitHub でログインして「承認待ち」になり、`/admin/` で自分を承認する
+
+## プライベートリポジトリ
+
+利用者が GitHub でログインしていれば、そのアカウントの権限で、プライベートリポジトリも clone できます。
+ただし、GitHub の普通のログイン(OAuth App)で `repo` 権限を取ると、**その人の全プライベートリポジトリの読み書き**を預かることになるので、
+代わりに **GitHub App** を使います。権限は「Contents の読み取りだけ」で、対象は**利用者が許可したリポジトリだけ**です。
+
+### 設定手順
+
+1. GitHub → Settings → Developer settings → **GitHub Apps** → **New GitHub App**
+   - GitHub App name: 任意(例 `devbox-clusters`)。この識別名が、URL `https://github.com/apps/<識別名>` になる
+   - Homepage URL: `https://devbox.clusters-prj.com`
+   - **Callback URL**: `https://devbox.clusters-prj.com/auth/github/callback`
+   - **Expire user authorization tokens**: ✅(オン。トークンの有効期限が8時間になる)
+   - **Request user authorization (OAuth) during installation**: ✅(インストールと同時にログインの許可も出る)
+   - Webhook: **Active のチェックを外す**
+   - Repository permissions → **Contents: Read-only**(Metadata は自動で読み取りになる)
+   - Where can this GitHub App be installed?: **Any account**(他の人のリポジトリも使わせるなら)
+2. 作成後、**Client ID**(`Iv…` で始まる)と、**Generate a new client secret** の値を控える
+3. `.env` を書き換える:
+   ```
+   GITHUB_CLIENT_ID=<GitHub App の Client ID>
+   GITHUB_CLIENT_SECRET=<GitHub App の Client secret>
+   GITHUB_APP_SLUG=<識別名>
+   ```
+   (OAuth App から GitHub App に変えると Client ID が変わりますが、GitHub のユーザーIDは同じなので、承認済みの利用者はそのまま使えます)
+4. `docker compose up -d devbox` で反映
+5. 利用者は、画面の「GitHub App をインストール」から、**使うリポジトリだけ**を許可して、**一度ログアウト→ログインし直す**(権限を受け取るため)
+
+### 動き方と安全のための決まり
+
+- clone は、まず**トークンなし**で試し(公開リポジトリはこれで通る)、失敗して、GitHub のリポジトリのときだけ、**そのプロジェクトの持ち主**のトークンで試し直す
+- トークンは暗号化(`SECRET_KEY`)して DB に保存する。コンテナにも、ログにも、画面にも出さない。clone の `git` には、コマンドの引数(`ps` で見える)ではなく環境変数で渡し、`github.com` 宛てにだけ付く
+- 有効期限は8時間。切れたら、リフレッシュトークン(最長6か月)で自動更新する。取り消された・期限切れのときは、保存を消して、再ログインをお願いするメッセージを出す
+- 画面の「連携を解除」で、保存しているトークンを消せる。GitHub 側では、Settings → Applications で App の許可を取り消せる
+- 組織のリポジトリは、組織の管理者が、その GitHub App を組織にインストールする必要がある
+- GitHub のリポジトリだけが対象(GitLab などは未対応)
+- `GITHUB_APP_SLUG` を設定しなければ、この機能は無効で、トークンも保存しない
 
 ### 管理画面 (`/admin/`)
 
@@ -237,7 +275,7 @@ Node 22.5+ が必要(組み込みの `node:sqlite` を使用)。
 ## 制約・今後
 
 - 開発サーバーは `0.0.0.0` で待ち受ける必要あり(`HOST` / `PORT` 環境変数を渡します。Vite なら `--host` が必要)
-- プライベートリポジトリ未対応(GitHub App 連携が必要)
+- プライベートリポジトリは GitHub のみ(GitLab などは未対応)
 - ブラウザ内エディタ (code-server) は未実装
 - 新規登録の通知は未実装(管理画面を開くと「承認待ち」が出る)
 - ログインの試行回数の制限は未実装

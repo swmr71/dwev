@@ -46,6 +46,9 @@ export const config = {
   github: {
     clientId: process.env.GITHUB_CLIENT_ID || '',
     clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
+    // プライベートリポジトリを使うための GitHub App の識別名(https://github.com/apps/<ここ>)。
+    // 設定すると、ログインで受け取ったトークン(読み取りのみ・暗号化)を保存して、clone に使う。未設定なら無効
+    appSlug: (process.env.GITHUB_APP_SLUG || '').trim(),
   },
   sessionDays: int(process.env.SESSION_DAYS, 14),
   // 利用者ごとの既定の上限(管理画面から人ごとに変えられる)

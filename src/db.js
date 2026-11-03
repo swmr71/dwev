@@ -52,6 +52,11 @@ for (const col of ['queued_at TEXT', 'started_at TEXT', 'user_id INTEGER', 'last
 }
 db.exec('CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id)');
 
+// 利用者の GitHub トークン(暗号化)。プライベートリポジトリの clone 用
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'gh_token_enc')) {
+  db.exec('ALTER TABLE users ADD COLUMN gh_token_enc TEXT');
+}
+
 const now = () => new Date().toISOString();
 
 export const newId = () => crypto.randomBytes(5).toString('hex'); // DNS-safe (hex, 10文字)
@@ -135,7 +140,7 @@ export function upsertGithubUser({ githubId, login, avatarUrl }) {
   return getUser(Number(r.lastInsertRowid));
 }
 
-const USER_COLUMNS = new Set(['status', 'max_projects', 'max_running']);
+const USER_COLUMNS = new Set(['status', 'max_projects', 'max_running', 'gh_token_enc']);
 
 export function updateUser(id, fields) {
   const keys = Object.keys(fields);

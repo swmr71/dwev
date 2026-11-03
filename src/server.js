@@ -18,6 +18,7 @@ import {
 import { assertDnsConfig, dnsEnabled } from './dns.js';
 import { readLog, removeLog } from './logs.js';
 import { verifyHuman, humanCheckEnabled, KEEPALIVE_ACTION } from './humancheck.js';
+import { privateReposEnabled, installUrl, hasToken, clearToken } from './ghtoken.js';
 import {
   loadUser, requireLogin, requireApproved, adminAuth, sameOriginOnly, authRouter, githubEnabled,
 } from './auth.js';
@@ -95,7 +96,21 @@ const guard = [requireLogin, requireApproved];
 
 // 状態の確認。ログイン前は 401、承認待ちでも返す(画面がメッセージを出すため)
 api.get('/me', requireLogin, (req, res) => {
-  res.json({ ...presentUser(req.user), githubLogin: githubEnabled() });
+  res.json({
+    ...presentUser(req.user),
+    githubLogin: githubEnabled(),
+    // プライベートリポジトリ。installUrl: 使うリポジトリを許可する GitHub App のインストール画面
+    // connected: 読み取りの権限(トークン)を受け取り済み。まだなら、ログインし直してもらう
+    privateRepos: privateReposEnabled()
+      ? { enabled: true, installUrl: installUrl(), connected: hasToken(req.user) }
+      : { enabled: false },
+  });
+});
+
+// 受け取った GitHub のトークンを、devbox から消す(プライベートリポジトリは使えなくなる)
+api.post('/me/github/disconnect', requireLogin, (req, res) => {
+  clearToken(req.user.id);
+  res.json({ ok: true });
 });
 
 api.get('/info', ...guard, (_req, res) => {

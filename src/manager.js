@@ -8,6 +8,7 @@ import { decryptJson } from './crypto.js';
 import { getProject, updateProject, listProjects, getUser, limitsFor } from './db.js';
 import { appendLog, resetLog } from './logs.js';
 import { detectRuntime } from './runtimes.js';
+import { privateReposEnabled, installUrl, getAccessToken } from './ghtoken.js';
 import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
 
 let docker = new Docker(); // /var/run/docker.sock
@@ -56,24 +57,70 @@ function run(cmd, args, opts = {}) {
   });
 }
 
+// GitHub のトークンで clone するための git の環境変数。トークンはコマンドの引数(ps で見える)には出さず、
+// 環境変数で渡す。ヘッダーは github.com 宛てだけに付ける(別のホストへのリダイレクトに付いていかない)。
+export function gitAuthEnv(token) {
+  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+  return {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+  };
+}
+
+// トークンが、エラーメッセージなどに混ざっても、伏せる
+export function scrubToken(text, token) {
+  if (!token) return String(text);
+  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+  return String(text).split(token).join('***').split(basic).join('***');
+}
+
+async function gitClone(p, dir, token) {
+  await run(
+    'git',
+    [
+      '-c', 'protocol.allow=never',
+      '-c', 'protocol.https.allow=always',
+      'clone', '--depth', '1', '--single-branch', '--no-tags',
+      '--branch', p.branch, '--', p.repo_url, dir,
+    ],
+    {
+      timeout: config.limits.cloneTimeoutSec * 1000,
+      env: { PATH: process.env.PATH, HOME: dir + '.home', GIT_TERMINAL_PROMPT: '0', ...(token ? gitAuthEnv(token) : {}) },
+    }
+  );
+}
+
+const cloneFailed = (e, token) =>
+  `git clone に失敗しました: ${redact(scrubToken((e.stderr || e.message).toString().trim(), token)).slice(0, 500)}`;
+
+// まずトークンなしで clone する(公開リポジトリはこれで通る)。失敗して、GitHub のリポジトリで、
+// プライベートリポジトリの機能が有効なら、持ち主のトークン(読み取りのみ)でもう一度試す。
 async function cloneRepo(p, dir) {
   appendLog(p.id, `==> git clone ${p.repo_url} (branch: ${p.branch})`);
   try {
-    await run(
-      'git',
-      [
-        '-c', 'protocol.allow=never',
-        '-c', 'protocol.https.allow=always',
-        'clone', '--depth', '1', '--single-branch', '--no-tags',
-        '--branch', p.branch, '--', p.repo_url, dir,
-      ],
-      {
-        timeout: config.limits.cloneTimeoutSec * 1000,
-        env: { PATH: process.env.PATH, HOME: dir + '.home', GIT_TERMINAL_PROMPT: '0' },
-      }
-    );
-  } catch (e) {
-    throw new Error(`git clone に失敗しました: ${redact((e.stderr || e.message).toString().trim()).slice(0, 500)}`);
+    await gitClone(p, dir, null);
+  } catch (first) {
+    if (!(privateReposEnabled() && p.user_id && new URL(p.repo_url).hostname === 'github.com')) {
+      throw new Error(cloneFailed(first, null));
+    }
+    const token = await getAccessToken(p.user_id);
+    if (!token) {
+      throw new Error(
+        `${cloneFailed(first, null)}
+プライベートリポジトリなら、一度ログアウトして GitHub でログインし直してください(読み取りの権限を受け取るため)`
+      );
+    }
+    appendLog(p.id, '==> 公開の clone に失敗したため、GitHub のログイン情報(読み取りのみ)で試します');
+    fs.rmSync(dir, { recursive: true, force: true });
+    try {
+      await gitClone(p, dir, token);
+    } catch (second) {
+      throw new Error(
+        `${cloneFailed(second, token)}
+プライベートリポジトリなら、${installUrl()} で、GitHub App にこのリポジトリを許可してください`
+      );
+    }
   }
   // リポジトリサイズの上限チェック
   let total = 0;
