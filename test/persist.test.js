@@ -193,6 +193,8 @@ test('enforceStops: 最大稼働時間を超えたものを止める(コンテ�
   try {
     const over = mk({ status: 'running', container_id: 'c-over', started_at: new Date(Date.now() - 61 * 60_000).toISOString() });
     const fine = mk({ status: 'running', container_id: 'c-fine', started_at: new Date(Date.now() - 10 * 60_000).toISOString() });
+    // 本物の Docker と同じく、動いているコンテナは一覧に出る
+    d.listContainers = async () => [over, fine].map((x) => ({ Labels: { 'devbox.id': x.id }, State: 'running' }));
     await enforceStops();
     assert.equal(getProject(over.id).status, 'stopped');
     assert.equal(getProject(over.id).container_id, 'c-over');
@@ -202,4 +204,33 @@ test('enforceStops: 最大稼働時間を超えたものを止める(コンテ�
   } finally {
     config.maxRuntimeHours = keep;
   }
+});
+
+test('reapExited: 実行中のはずのコンテナが終了していたら、失敗にして理由を残す(コンテナは消さない)', async () => {
+  const { reapExited } = await import('../src/manager.js');
+  const crashed = mk({ status: 'running', container_id: 'c-crash', started_at: new Date().toISOString() });
+  const oom = mk({ status: 'running', container_id: 'c-oom' });
+  const alive = mk({ status: 'running', container_id: 'c-alive' });
+  const gone = mk({ status: 'running', container_id: 'c-gone' });
+  const states = {
+    [crashed.id]: { State: 'exited', info: { State: { ExitCode: 1, OOMKilled: false } } },
+    [oom.id]: { State: 'exited', info: { State: { ExitCode: 137, OOMKilled: true } } },
+    [alive.id]: { State: 'running' },
+  };
+  const d = fakeDocker();
+  d.listContainers = async () => Object.entries(states).map(([id, s]) => ({ Labels: { 'devbox.id': id }, State: s.State }));
+  const base = d.getContainer;
+  d.getContainer = (name) => ({ ...base(name), inspect: async () => states[name.replace('devbox-', '')]?.info ?? {} });
+  setDockerForTest(d);
+
+  assert.ok((await reapExited()) >= 3); // 前のテストで残った「実行中」も、一緒に失敗になる
+  assert.equal(getProject(crashed.id).status, 'failed');
+  assert.match(getProject(crashed.id).error, /終了コード 1/);
+  assert.equal(getProject(crashed.id).container_id, 'c-crash'); // 実行ログを読めるように残す
+  assert.match(getProject(oom.id).error, /メモリの上限/);
+  assert.equal(getProject(alive.id).status, 'running');
+  // コンテナ自体が無くなっていたら、container_id も空に
+  assert.equal(getProject(gone.id).status, 'failed');
+  assert.equal(getProject(gone.id).container_id, null);
+  assert.ok(!d.calls.some((c) => c[0] === 'remove'));
 });

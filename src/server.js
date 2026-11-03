@@ -63,6 +63,8 @@ function present(p) {
     envKeys,
     previewUrl: previewUrl(p.id),
     cpuMs: p.cpu_ms || 0,
+    // コンテナが残っている(止まっていても、実行ログを読める)
+    hasContainer: Boolean(p.container_id),
     // 停止中で、前回のコンテナ(書き込んだデータ)が残っている。「起動」でそのまま再開できる
     resumable: p.status === 'stopped' && canResume(p),
     // 設定を変えたので、次の起動はビルドからになる(データは消える)

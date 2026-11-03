@@ -728,12 +728,54 @@ export function startDueConfirms(nowMs = Date.now()) {
 }
 
 // 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
+// 「実行中」のはずのコンテナが、実際には終了していたら(アプリのクラッシュ・メモリ超過)、失敗にして理由を残す。
+// コンテナは消さない(実行ログを読めるように)。戻り値は、失敗にしたプロジェクトの数
+export async function reapExited() {
+  const running = listProjects().filter((p) => p.status === 'running' && !busy.has(p.id));
+  if (running.length === 0) return 0;
+  let state;
+  try {
+    const list = await docker.listContainers({ all: true, filters: { label: ['devbox.id'] } });
+    state = new Map(list.map((c) => [c.Labels['devbox.id'], c.State]));
+  } catch {
+    return 0; // Docker に問い合わせられない回は、何もしない
+  }
+  let n = 0;
+  for (const p of running) {
+    if (busy.has(p.id) || state.get(p.id) === 'running') continue;
+    let error = 'アプリのコンテナが終了しました。実行ログを確認してください';
+    let kept = state.has(p.id);
+    if (kept) {
+      try {
+        const info = await docker.getContainer(containerName(p.id)).inspect();
+        error = info.State?.OOMKilled
+          ? `メモリの上限(${config.limits.memoryMb}MB)を超えて、アプリが終了しました`
+          : `アプリが終了しました(終了コード ${info.State?.ExitCode})。実行ログを確認してください`;
+      } catch (e) {
+        if (e.statusCode === 404) kept = false;
+      }
+    }
+    appendLog(p.id, `!! ${error}`);
+    updateProject(p.id, {
+      status: 'failed', error, started_at: null, last_active_at: null, keepalive_at: null, confirm_deadline_at: null,
+      container_id: kept ? p.container_id : null,
+    });
+    lastRx.delete(p.id);
+    lastCpuNs.delete(p.id);
+    await safeDeleteDns(p.id);
+    n++;
+  }
+  if (n) drainQueue();
+  return n;
+}
+
 // 確認を始める・止めるべきものを止める。表示のタイマーが 0:00 になったとき、ちょうど動くように、5秒ごとに呼ぶ
 let enforcing = false;
 export async function enforceStops() {
   if (enforcing) return; // 前回の停止(docker stop)が長引いているときは、重ねない
   enforcing = true;
   try {
+    await reapExited();
     startDueConfirms();
     for (const p of listProjects()) {
       if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;

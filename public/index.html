@@ -370,7 +370,7 @@ function render(projects) {
             : [startBtn(p, false, p.needsRebuild ? '起動(再ビルド)' : '起動', p.needsRebuild)]),
         el('button', { disabled: !(p.status === 'running' || p.status === 'queued') || p.busy, onclick: () => act(p.id, () => api(`/projects/${p.id}/stop`, { method: 'POST' })) }, p.status === 'queued' ? '待機をやめる' : '停止'),
         el('button', { onclick: () => { openLogs.set(p.id, { type: 'build', offset: 0, text: '' }); refresh(); } }, 'ビルドログ'),
-        el('button', { disabled: p.status !== 'running', onclick: async () => { const r = await api(`/projects/${p.id}/runtime-log`); openLogs.set(p.id, { type: 'runtime', offset: 0, text: r.text || '(ログなし)' }); refresh(); } }, '実行ログ'),
+        el('button', { disabled: !p.hasContainer, onclick: async () => { const r = await api(`/projects/${p.id}/runtime-log`); openLogs.set(p.id, { type: 'runtime', offset: 0, text: r.text || '(ログなし)' }); refresh(); } }, '実行ログ'),
         el('button', { disabled: p.busy || p.status === 'building', onclick: () => act(p.id, async () => {
           const t = prompt('環境変数を全て入力し直してください (KEY=VALUE を改行区切り)。空欄で全削除。\n現在のキー: ' + p.envKeys.join(', '), '');
           if (t === null) return;
