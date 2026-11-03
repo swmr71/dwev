@@ -351,6 +351,7 @@ export async function stopProject(id) {
     await safeDeleteDns(id);
     updateProject(id, { status: 'stopped', container_id: null, started_at: null, last_active_at: null });
     lastRx.delete(id);
+    lastCpuNs.delete(id);
   } finally {
     busy.delete(id);
   }
@@ -471,31 +472,47 @@ export function stopReason(p, nowMs = Date.now()) {
   return null;
 }
 
-// ---- 無操作の検知 -----------------------------------------------------------
-// コンテナが受け取った通信量(rx_bytes)が、前回より IDLE_RX_BYTES 以上増えていれば「操作あり」とする。
-// プレビューへのアクセスは必ずコンテナへの受信になる。コンテナが再起動して数字が戻った場合も「操作あり」。
+// ---- 実行中の計測(無操作の検知・CPU時間) ---------------------------------------
+// 1分ごとにコンテナの統計を1回読み、前回との差から次の2つを求める。
+//  - 無操作の検知: 受信した通信量(rx_bytes)が IDLE_RX_BYTES 以上増えていれば「操作あり」。
+//    プレビューへのアクセスは必ずコンテナへの受信になる。
+//  - CPU時間: コンテナが使ったCPU時間(ナノ秒)の増え分を、ミリ秒にしてプロジェクトごとに累計する。
+// どちらもコンテナが再起動して数字が戻った場合は、「操作あり」として、戻った後の値から数え直す。
+// 基準値はメモリ上に持つので、devbox の再起動後、最初の1回は基準を取るだけ(その分は数えない)。
 const IDLE_RX_BYTES = 2048;
 const lastRx = new Map();
+const lastCpuNs = new Map();
 
-async function sampleActivity(p) {
-  if (!config.idleStopMinutes || p.status !== 'running' || !p.container_id) return;
+// 前回との差。数字が戻っていたら(再起動)、今の値そのものを差とみなす
+export const counterDelta = (prev, cur) => (prev === undefined ? 0 : cur >= prev ? cur - prev : cur);
+
+async function sampleContainer(p) {
+  if (p.status !== 'running' || !p.container_id) return;
   try {
     const stats = await docker.getContainer(p.container_id).stats({ stream: false, 'one-shot': true });
+    const fields = {};
+
     const rx = Object.values(stats.networks || {}).reduce((sum, n) => sum + (n.rx_bytes || 0), 0);
-    const prev = lastRx.get(p.id);
+    const prevRx = lastRx.get(p.id);
     lastRx.set(p.id, rx);
-    if (prev !== undefined && (rx < prev || rx - prev >= IDLE_RX_BYTES)) {
-      updateProject(p.id, { last_active_at: nowIso() });
+    if (prevRx !== undefined && (rx < prevRx || rx - prevRx >= IDLE_RX_BYTES)) fields.last_active_at = nowIso();
+
+    const cpuNs = stats.cpu_stats?.cpu_usage?.total_usage;
+    if (typeof cpuNs === 'number') {
+      const deltaMs = Math.round(counterDelta(lastCpuNs.get(p.id), cpuNs) / 1e6);
+      lastCpuNs.set(p.id, cpuNs);
+      if (deltaMs > 0) fields.cpu_ms = (p.cpu_ms || 0) + deltaMs;
     }
+    if (Object.keys(fields).length) updateProject(p.id, fields);
   } catch {
-    /* 取れなかった回は、操作なしとして数える */
+    /* 取れなかった回は、操作なし・CPU時間0として数える */
   }
 }
 
 // 1分ごとに、止めるべきものを止める / DNS の取り残しを定期的に掃除
 export function startReaper() {
   setInterval(async () => {
-    await Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleActivity));
+    await Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleContainer));
     for (const p of listProjects()) {
       if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
       const reason = stopReason(p);

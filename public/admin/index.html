@@ -82,7 +82,7 @@
   <section class="card" id="projects-box" hidden>
     <h2>すべてのプロジェクト</h2>
     <table>
-      <thead><tr><th>持ち主</th><th>名前</th><th>リポジトリ</th><th>状態</th><th>プレビュー</th><th></th></tr></thead>
+      <thead><tr><th>持ち主</th><th>名前</th><th>リポジトリ</th><th>状態</th><th>プレビュー</th><th>CPU時間</th><th></th></tr></thead>
       <tbody id="projects"></tbody>
     </table>
   </section>
@@ -182,6 +182,7 @@ function renderProjects(projects) {
       el('td', { class: 'wrap' }, `${p.repoUrl} @ ${p.branch}`),
       el('td', {}, badge(p.status)),
       el('td', {}, p.status === 'running' ? el('a', { href: p.previewUrl, target: '_blank', rel: 'noopener noreferrer' }, p.previewUrl.replace(/^https?:\/\//, '')) : ''),
+      el('td', {}, `${(p.cpuMs || 0).toLocaleString()} ms`),
       el('td', {}, el('div', { class: 'row' },
         el('button', { disabled: !(p.status === 'running' || p.status === 'queued') || p.busy, onclick: () => act(() => api(`/projects/${p.id}/stop`, { method: 'POST' })) }, '停止'),
         el('button', { class: 'danger', disabled: p.busy, onclick: () => { if (confirm(`「${p.name}」(${p.owner ?? '持ち主なし'}) を削除しますか？`)) act(() => api(`/projects/${p.id}`, { method: 'DELETE' })); } }, '削除'))))));

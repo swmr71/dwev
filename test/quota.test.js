@@ -151,3 +151,18 @@ test('buildLimitOpts: ビルドにメモリ・CPU上限と、実行時と同じ�
   assert.equal(o.cpuquota, config.limits.buildCpus * o.cpuperiod);
   assert.equal(o.networkmode, config.dockerNetwork);
 });
+
+test('counterDelta: 前回との差を返す。基準が無ければ0、数字が戻っていれば(再起動)今の値', async () => {
+  const { counterDelta } = await import('../src/manager.js');
+  assert.equal(counterDelta(undefined, 5_000_000), 0);
+  assert.equal(counterDelta(1_000_000, 4_500_000), 3_500_000);
+  assert.equal(counterDelta(9_000_000, 2_000_000), 2_000_000);
+  assert.equal(counterDelta(3, 3), 0);
+});
+
+test('既定の実行時の上限: メモリ256MB・CPU 0.5・PID 128', async () => {
+  const { config } = await import('../src/config.js');
+  assert.equal(config.limits.memoryMb, 256);
+  assert.equal(config.limits.cpus, 0.5);
+  assert.equal(config.limits.pids, 128);
+});

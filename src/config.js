@@ -90,9 +90,9 @@ export const config = {
 
   // コンテナのリソース制限
   limits: {
-    memoryMb: int(process.env.LIMIT_MEMORY_MB, 512),
-    cpus: Number(process.env.LIMIT_CPUS) > 0 ? Number(process.env.LIMIT_CPUS) : 1,
-    pids: int(process.env.LIMIT_PIDS, 256),
+    memoryMb: int(process.env.LIMIT_MEMORY_MB, 256),
+    cpus: Number(process.env.LIMIT_CPUS) > 0 ? Number(process.env.LIMIT_CPUS) : 0.5,
+    pids: int(process.env.LIMIT_PIDS, 128),
     // サーバー全体のプロジェクト数の上限(利用者ごとの上限とは別)
     maxProjects: int(process.env.MAX_PROJECTS, 200),
     maxConcurrentBuilds: int(process.env.MAX_CONCURRENT_BUILDS, 2),

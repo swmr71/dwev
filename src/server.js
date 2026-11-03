@@ -59,6 +59,7 @@ function present(p) {
     error: p.error,
     envKeys,
     previewUrl: previewUrl(p.id),
+    cpuMs: p.cpu_ms || 0,
     queuePosition: p.status === 'queued' ? queuePosition(p.id) : null,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
