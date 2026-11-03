@@ -56,11 +56,19 @@
   .user img { width: 24px; height: 24px; border-radius: 50%; }
   .notice { border-color: var(--orange); }
   .quota { color: var(--muted); font-size: 12px; margin-top: 6px; }
-  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+  /* 全画面の警告。見逃さないように、画面全体を覆って、赤く脈打つ */
+  .modal-bg { position: fixed; inset: 0; background: #2a0d10; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; animation: alert-pulse 1s ease-in-out infinite; overflow: auto; }
   .modal-bg[hidden] { display: none; }
-  .modal { background: var(--panel); border: 1px solid var(--orange); border-radius: 12px; padding: 20px; width: 100%; max-width: 440px; }
-  .modal h2 { margin: 0 0 8px; font-size: 18px; }
-  .modal .count { font-size: 28px; font-weight: 700; color: var(--orange); margin: 6px 0; }
+  @keyframes alert-pulse { 0%, 100% { background: #2a0d10; box-shadow: inset 0 0 0 10px var(--red); } 50% { background: #4a1216; box-shadow: inset 0 0 0 10px var(--orange); } }
+  @media (prefers-reduced-motion: reduce) { .modal-bg { animation: none; box-shadow: inset 0 0 0 10px var(--red); } }
+  .modal { text-align: center; width: 100%; max-width: 560px; }
+  .modal .warn { font-size: 64px; line-height: 1; }
+  .modal h2 { margin: 8px 0; font-size: 32px; }
+  .modal .count { font-size: 72px; font-weight: 800; color: var(--orange); margin: 8px 0; font-variant-numeric: tabular-nums; }
+  .modal .meta, .modal .hint { font-size: 15px; }
+  .modal button { font-size: 18px; padding: 14px 28px; }
+  .modal .actions { justify-content: center; }
+  .notify-btn { font-size: 12px; padding: 4px 10px; }
   /* 広告を出すときの場所。今は空 */
   .ad-slot { min-height: 0; margin: 10px 0; }
   .modal .actions { display: flex; gap: 10px; margin-top: 12px; }
@@ -69,6 +77,7 @@
 <body>
 <div class="modal-bg" id="confirm-modal" hidden role="alertdialog" aria-labelledby="confirm-title">
   <div class="modal">
+    <div class="warn" aria-hidden="true">⚠️</div>
     <h2 id="confirm-title">まだ使っていますか?</h2>
     <div id="confirm-name" class="meta"></div>
     <div class="count" id="confirm-count"></div>
@@ -86,6 +95,7 @@
   <h1>devbox</h1>
   <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
     <span class="info" id="info"></span>
+    <button class="notify-btn" id="notify-btn" hidden title="確認が出たときに、別のタブを見ていても、デスクトップ通知でお知らせします">🔔 通知をオンにする</button>
     <span class="user" id="user" hidden><img id="user-img" alt="" hidden><span id="user-name"></span></span>
     <button id="logout" hidden>ログアウト</button>
   </div>
@@ -312,14 +322,64 @@ function loadTurnstile() {
   });
 }
 
-function tickCount() {
+function fmtLeft() {
   const left = Math.max(0, Math.ceil((cf.deadline - Date.now()) / 1000));
-  $('confirm-count').textContent = `あと ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+}
+
+// 音(最初に画面を触ったあとでないと、ブラウザが鳴らさせてくれない)
+let audio = null;
+document.addEventListener('pointerdown', () => {
+  try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume(); } catch { /* 音なしで動かす */ }
+}, { once: true });
+function beep() {
+  if (!audio || audio.state !== 'running') return;
+  for (const [i, hz] of [880, 660, 880].entries()) {
+    const t = audio.currentTime + i * 0.22;
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = 'square'; o.frequency.value = hz;
+    g.gain.setValueAtTime(0.06, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + 0.2);
+  }
+}
+
+// 別のタブを見ているとき用のデスクトップ通知(許可されているときだけ)
+let note = null;
+function notifyConfirm(p) {
+  if (!('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
+  try {
+    note = new Notification('⚠ まだ使っていますか?', {
+      body: `「${p.name}」は、あと ${fmtLeft()} で停止します。押して確認してください`,
+      tag: 'devbox-confirm', requireInteraction: true,
+    });
+    note.onclick = () => { window.focus(); note.close(); };
+  } catch { /* 通知なしで動かす */ }
+}
+
+function updateNotifyBtn() {
+  const b = $('notify-btn');
+  b.hidden = !('Notification' in window) || Notification.permission !== 'default';
+}
+$('notify-btn').onclick = async () => {
+  try { await Notification.requestPermission(); } catch { /* 許可されなければ、そのまま */ }
+  updateNotifyBtn();
+};
+updateNotifyBtn();
+
+let flash = false;
+function tickCount() {
+  $('confirm-count').textContent = `あと ${fmtLeft()}`;
+  if (!$('confirm-modal').hidden) {
+    flash = !flash;
+    document.title = flash ? '⚠ 確認が必要! - ' + baseTitle : `🔴 あと ${fmtLeft()} - ` + baseTitle;
+  }
 }
 
 function hideConfirm() {
   $('confirm-modal').hidden = true;
   clearInterval(cf.countTimer); cf.countTimer = null;
+  clearInterval(cf.beepTimer); cf.beepTimer = null;
+  if (note) { try { note.close(); } catch { /* 閉じていてよい */ } note = null; }
   if (cf.widget !== null && window.turnstile) { try { window.turnstile.remove(cf.widget); } catch { /* 消えていてよい */ } }
   Object.assign(cf, { id: null, widget: null, token: null });
   document.title = baseTitle;
@@ -331,8 +391,10 @@ async function showConfirm(p) {
   $('confirm-err').textContent = '';
   $('confirm-ok').disabled = !!cf.siteKey;
   $('confirm-modal').hidden = false;
-  document.title = '⚠ 確認が必要 - ' + baseTitle;
   clearInterval(cf.countTimer); cf.countTimer = setInterval(tickCount, 1000);
+  tickCount();
+  beep(); clearInterval(cf.beepTimer); cf.beepTimer = setInterval(beep, 5000);
+  notifyConfirm(p);
   if (cf.siteKey) {
     try {
       await loadTurnstile();
