@@ -13,9 +13,11 @@ import {
 import {
   startProject, stopProject, deleteProjectResources, runtimeLogs, reconcile, dockerPing, previewUrl, isBusy,
   drainQueue, queuePosition, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, stopUserProjects,
+  confirmSecondsLeft, secondsToConfirm, acknowledgeConfirm, ConfirmError,
 } from './manager.js';
 import { assertDnsConfig, dnsEnabled } from './dns.js';
 import { readLog, removeLog } from './logs.js';
+import { verifyHuman, humanCheckEnabled } from './humancheck.js';
 import {
   loadUser, requireLogin, requireApproved, adminAuth, sameOriginOnly, authRouter, githubEnabled,
 } from './auth.js';
@@ -60,6 +62,8 @@ function present(p) {
     envKeys,
     previewUrl: previewUrl(p.id),
     cpuMs: p.cpu_ms || 0,
+    confirmSecondsLeft: confirmSecondsLeft(p),
+    secondsToConfirm: secondsToConfirm(p),
     queuePosition: p.status === 'queued' ? queuePosition(p.id) : null,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
@@ -95,6 +99,9 @@ api.get('/info', ...guard, (_req, res) => {
     maxRunning: config.maxRunning,
     maxRuntimeHours: config.maxRuntimeHours,
     idleStopMinutes: config.idleStopMinutes,
+    keepaliveMinutes: config.keepaliveMinutes,
+    keepaliveGraceMinutes: config.keepaliveGraceMinutes,
+    turnstileSiteKey: humanCheckEnabled() ? config.turnstile.siteKey : '',
   });
 });
 
@@ -149,6 +156,31 @@ api.post('/projects/:id/start', ...guard, load, (req, res) => {
   if (isBusy(req.project.id)) return res.status(409).json({ error: '処理中です' });
   startProject(req.project.id);
   res.status(202).json(present(getProject(req.project.id)));
+});
+
+// 「まだ使っていますか?」への応答。確認を求められている間だけ受け付け、人かどうかも確かめる。
+// 失敗が続くとしばらく断る(スクリプトで総当たりされないように)。
+const humanFails = new Map(); // userId -> { count, resetAt }
+api.post('/projects/:id/keepalive', ...guard, load, async (req, res) => {
+  const fail = humanFails.get(req.user.id);
+  if (fail && fail.resetAt > Date.now() && fail.count >= 5) {
+    return res.status(429).json({ error: '失敗が続いています。しばらくしてからやり直してください' });
+  }
+  if (confirmSecondsLeft(req.project) === null) {
+    return res.status(409).json({ error: 'いま確認は求められていません' });
+  }
+  if (!(await verifyHuman(req.body?.token))) {
+    const cur = fail && fail.resetAt > Date.now() ? fail : { count: 0, resetAt: Date.now() + 60_000 };
+    cur.count++;
+    humanFails.set(req.user.id, cur);
+    return res.status(400).json({ error: '人であることを確認できませんでした。もう一度お試しください', code: 'human' });
+  }
+  try {
+    res.json(present(acknowledgeConfirm(req.project.id)));
+  } catch (e) {
+    if (e instanceof ConfirmError) return res.status(409).json({ error: e.message });
+    throw e;
+  }
 });
 
 api.post('/projects/:id/stop', ...guard, load, async (req, res) => {

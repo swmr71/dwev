@@ -314,7 +314,8 @@ function launch(id) {
       }
       appendLog(id, '==> コンテナを起動');
       const containerId = await runContainer(p);
-      updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso(), last_active_at: nowIso() });
+      updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso(), last_active_at: nowIso(),
+        keepalive_at: nowIso(), confirm_deadline_at: null });
       appendLog(id, `==> 起動しました: ${previewUrl(id)}`);
     } catch (e) {
       const msg = redact(e.message);
@@ -349,7 +350,7 @@ export async function stopProject(id) {
   try {
     await removeContainer(id);
     await safeDeleteDns(id);
-    updateProject(id, { status: 'stopped', container_id: null, started_at: null, last_active_at: null });
+    updateProject(id, { status: 'stopped', container_id: null, started_at: null, last_active_at: null, keepalive_at: null, confirm_deadline_at: null });
     lastRx.delete(id);
     lastCpuNs.delete(id);
   } finally {
@@ -442,7 +443,7 @@ export async function reconcile() {
     if (p.status === 'building') {
       updateProject(p.id, { status: 'failed', error: 'サーバー再起動によりビルドが中断されました', started_at: null });
     } else if (p.status === 'running' && !running.has(p.id)) {
-      updateProject(p.id, { status: 'stopped', container_id: null, started_at: null });
+      updateProject(p.id, { status: 'stopped', container_id: null, started_at: null, keepalive_at: null, confirm_deadline_at: null });
     }
   }
   await sweepDns();
@@ -453,6 +454,7 @@ export async function reconcile() {
 //   - 持ち主のアカウントが「承認済み」でなくなった(凍結など)
 //   - 最大稼働時間を超えた
 //   - 無操作の時間が長い
+//   - 「まだ使っていますか?」の確認に、猶予の間に応答がなかった
 export function stopReason(p, nowMs = Date.now()) {
   if (p.user_id) {
     const owner = getUser(p.user_id);
@@ -469,7 +471,46 @@ export function stopReason(p, nowMs = Date.now()) {
       return `${config.idleStopMinutes}分間操作がなかったため停止します`;
     }
   }
+  if (config.keepaliveMinutes && p.status === 'running' && p.confirm_deadline_at) {
+    if (nowMs > Date.parse(p.confirm_deadline_at)) {
+      return `${config.keepaliveMinutes}分ごとの「まだ使っていますか?」に応答がなかったため停止します`;
+    }
+  }
   return null;
+}
+
+// ---- 「まだ使っていますか?」の確認 -------------------------------------------------
+// 起動(または前回の確認)から keepaliveMinutes たつと、確認を求める(confirm_deadline_at に期限を入れる)。
+// 期限までに利用者が確認ボタンを押さなければ、stopReason が停止させる。通信の有無は見ない。
+const keepaliveBase = (p) => Date.parse(p.keepalive_at || p.started_at || '');
+
+export function confirmDue(p, nowMs = Date.now()) {
+  if (!config.keepaliveMinutes || p.status !== 'running' || p.confirm_deadline_at) return false;
+  const base = keepaliveBase(p);
+  return Boolean(base) && nowMs - base >= config.keepaliveMinutes * 60_000;
+}
+
+// 次に確認が入るまでの秒数(確認待ちのとき・無効のときは null)
+export function secondsToConfirm(p, nowMs = Date.now()) {
+  if (!config.keepaliveMinutes || p.status !== 'running' || p.confirm_deadline_at) return null;
+  const base = keepaliveBase(p);
+  return base ? Math.max(0, Math.ceil((base + config.keepaliveMinutes * 60_000 - nowMs) / 1000)) : null;
+}
+
+// 確認待ちの残り秒数(確認待ちでなければ null)
+export function confirmSecondsLeft(p, nowMs = Date.now()) {
+  if (!config.keepaliveMinutes || p.status !== 'running' || !p.confirm_deadline_at) return null;
+  return Math.max(0, Math.ceil((Date.parse(p.confirm_deadline_at) - nowMs) / 1000));
+}
+
+export class ConfirmError extends Error {}
+
+// 確認ボタンが押されたとき。確認を求められている間だけ受け付ける(先回しの確認はできない)
+export function acknowledgeConfirm(id, nowMs = Date.now()) {
+  const p = getProject(id);
+  if (!p || p.status !== 'running' || !p.confirm_deadline_at) throw new ConfirmError('いま確認は求められていません');
+  if (nowMs > Date.parse(p.confirm_deadline_at)) throw new ConfirmError('確認の期限が切れました');
+  return updateProject(id, { keepalive_at: new Date(nowMs).toISOString(), confirm_deadline_at: null });
 }
 
 // ---- 実行中の計測(無操作の検知・CPU時間) ---------------------------------------
@@ -513,8 +554,13 @@ async function sampleContainer(p) {
 export function startReaper() {
   setInterval(async () => {
     await Promise.all(listProjects().filter((p) => !busy.has(p.id)).map(sampleContainer));
-    for (const p of listProjects()) {
+    for (let p of listProjects()) {
       if (busy.has(p.id) || !(p.status === 'running' || p.status === 'queued')) continue;
+      if (confirmDue(p)) {
+        const deadline = new Date(Date.now() + config.keepaliveGraceMinutes * 60_000).toISOString();
+        p = updateProject(p.id, { confirm_deadline_at: deadline });
+        appendLog(p.id, `==> まだ使っていますか? ${config.keepaliveGraceMinutes}分以内に、devbox の画面で「続ける」を押してください`);
+      }
       const reason = stopReason(p);
       if (!reason) continue;
       try {

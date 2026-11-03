@@ -64,9 +64,19 @@ export const config = {
   // 最大稼働時間(時間)。超えたら自動停止。0 なら無効。
   maxRuntimeHours: Number(process.env.MAX_RUNTIME_HOURS) > 0 ? Number(process.env.MAX_RUNTIME_HOURS) : 0,
 
+  // 利用者への「まだ使っていますか?」の確認。使っていても使っていなくても、N分ごとに求める。
+  // 確認ボタンを押す(人かどうかの確認つき)まで、猶予の分数が過ぎると自動停止。0 なら無効。
+  keepaliveMinutes: Number(process.env.KEEPALIVE_MINUTES ?? 10) > 0 ? Number(process.env.KEEPALIVE_MINUTES ?? 10) : 0,
+  keepaliveGraceMinutes: Number(process.env.KEEPALIVE_GRACE_MINUTES) > 0 ? Number(process.env.KEEPALIVE_GRACE_MINUTES) : 5,
+  // 確認ボタンを、スクリプトに押させないための Cloudflare Turnstile。2つそろったときだけ有効。
+  turnstile: {
+    siteKey: process.env.TURNSTILE_SITE_KEY || '',
+    secret: process.env.TURNSTILE_SECRET_KEY || '',
+  },
+
   // 無操作でこの時間(分)たったら自動停止。0 なら無効。
   // 「操作」は、コンテナが受け取った通信量(プレビューへのアクセス)が増えたかどうかで見る。
-  idleStopMinutes: Number(process.env.IDLE_STOP_MINUTES ?? 60) > 0 ? Number(process.env.IDLE_STOP_MINUTES ?? 60) : 0,
+  idleStopMinutes: Number(process.env.IDLE_STOP_MINUTES) > 0 ? Number(process.env.IDLE_STOP_MINUTES) : 0,
 
   // プレビュー用DNSレコードの自動作成・削除 (Cloudflare API)。3つ全部設定したときだけ有効。
   //   CF_API_TOKEN : 権限は「対象ゾーンの DNS 編集」だけにすること

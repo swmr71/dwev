@@ -56,9 +56,32 @@
   .user img { width: 24px; height: 24px; border-radius: 50%; }
   .notice { border-color: var(--orange); }
   .quota { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+  .modal-bg[hidden] { display: none; }
+  .modal { background: var(--panel); border: 1px solid var(--orange); border-radius: 12px; padding: 20px; width: 100%; max-width: 440px; }
+  .modal h2 { margin: 0 0 8px; font-size: 18px; }
+  .modal .count { font-size: 28px; font-weight: 700; color: var(--orange); margin: 6px 0; }
+  /* 広告を出すときの場所。今は空 */
+  .ad-slot { min-height: 0; margin: 10px 0; }
+  .modal .actions { display: flex; gap: 10px; margin-top: 12px; }
 </style>
 </head>
 <body>
+<div class="modal-bg" id="confirm-modal" hidden role="alertdialog" aria-labelledby="confirm-title">
+  <div class="modal">
+    <h2 id="confirm-title">まだ使っていますか?</h2>
+    <div id="confirm-name" class="meta"></div>
+    <div class="count" id="confirm-count"></div>
+    <div class="hint">押さないと、そのまま停止します(データはリポジトリから取り直せます)。</div>
+    <div class="ad-slot" id="ad-slot"></div>
+    <div id="ts-box"></div>
+    <div class="err" id="confirm-err"></div>
+    <div class="actions">
+      <button class="primary" id="confirm-ok" disabled>続ける</button>
+      <button id="confirm-stop">停止する</button>
+    </div>
+  </div>
+</div>
 <header>
   <h1>devbox</h1>
   <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -170,6 +193,7 @@ function showUsage(i) {
     `プロジェクト ${u.projects}/${l.maxProjects} ・ 同時起動 ${u.running}/${l.maxRunning}` +
     (i ? ` ・ 全体の稼働 ${i.active}/${i.maxRunning}` : '') +
     (i && i.maxRuntimeHours ? ` ・ 最大${i.maxRuntimeHours}時間で自動停止` : '') +
+    (i && i.keepaliveMinutes ? ` ・ ${i.keepaliveMinutes}分ごとに「まだ使っていますか?」の確認` : '') +
     (i && i.idleStopMinutes ? ` ・ ${i.idleStopMinutes}分間アクセスがないと自動停止` : '');
 }
 
@@ -254,12 +278,92 @@ function render(projects) {
   }
 }
 
+// ---- 「まだ使っていますか?」の確認 -----------------------------------------------
+const cf = { id: null, widget: null, token: null, deadline: 0, siteKey: '', countTimer: null };
+const baseTitle = document.title;
+
+function loadTurnstile() {
+  if (window.turnstile) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    s.async = true; s.onload = resolve; s.onerror = reject;
+    document.head.append(s);
+  });
+}
+
+function tickCount() {
+  const left = Math.max(0, Math.ceil((cf.deadline - Date.now()) / 1000));
+  $('confirm-count').textContent = `あと ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+}
+
+function hideConfirm() {
+  $('confirm-modal').hidden = true;
+  clearInterval(cf.countTimer); cf.countTimer = null;
+  if (cf.widget !== null && window.turnstile) { try { window.turnstile.remove(cf.widget); } catch { /* 消えていてよい */ } }
+  Object.assign(cf, { id: null, widget: null, token: null });
+  document.title = baseTitle;
+}
+
+async function showConfirm(p) {
+  cf.id = p.id; cf.token = null;
+  $('confirm-name').textContent = p.name;
+  $('confirm-err').textContent = '';
+  $('confirm-ok').disabled = !!cf.siteKey;
+  $('confirm-modal').hidden = false;
+  document.title = '⚠ 確認が必要 - ' + baseTitle;
+  clearInterval(cf.countTimer); cf.countTimer = setInterval(tickCount, 1000);
+  if (cf.siteKey) {
+    try {
+      await loadTurnstile();
+      if (cf.id !== p.id) return;
+      $('ts-box').replaceChildren();
+      cf.widget = window.turnstile.render('#ts-box', {
+        sitekey: cf.siteKey, theme: 'dark',
+        callback: (t) => { cf.token = t; $('confirm-ok').disabled = false; },
+        'expired-callback': () => { cf.token = null; $('confirm-ok').disabled = true; },
+      });
+    } catch { $('confirm-err').textContent = '人かどうかの確認を読み込めませんでした。ページを開き直してください'; }
+  }
+}
+
+// 一覧を作り直しても、確認ダイアログ(とその中のウィジェット)は作り直さない
+function updateConfirm(projects, info) {
+  if (info) cf.siteKey = info.turnstileSiteKey || '';
+  const p = projects.find((x) => x.confirmSecondsLeft !== null && x.confirmSecondsLeft !== undefined);
+  if (!p) { if (cf.id) hideConfirm(); return; }
+  cf.deadline = Date.now() + p.confirmSecondsLeft * 1000;
+  tickCount();
+  if (cf.id !== p.id) showConfirm(p);
+}
+
+$('confirm-ok').onclick = async () => {
+  $('confirm-err').textContent = '';
+  $('confirm-ok').disabled = true;
+  try {
+    await api(`/projects/${cf.id}/keepalive`, { method: 'POST', body: { token: cf.token } });
+    hideConfirm();
+    await refresh();
+  } catch (e) {
+    $('confirm-err').textContent = e.message;
+    if (window.turnstile && cf.widget !== null) { cf.token = null; try { window.turnstile.reset(cf.widget); } catch { /* 次の更新で作り直す */ } }
+    else $('confirm-ok').disabled = false;
+  }
+};
+$('confirm-stop').onclick = async () => {
+  const id = cf.id;
+  hideConfirm();
+  if (id) await act(id, () => api(`/projects/${id}/stop`, { method: 'POST' }));
+};
+
 let timer = null;
 async function refresh() {
   const projects = await api('/projects');
+  let info = null;
   try {
     me = { ...me, ...(await (await fetch('/api/me', { credentials: 'same-origin' })).json()) };
-    showUsage(await api('/info'));
+    info = await api('/info');
+    showUsage(info);
   } catch { /* 情報が取れなくても本体は動かす */ }
   // ビルドログの差分取得
   for (const p of projects) {
@@ -270,9 +374,10 @@ async function refresh() {
     }
   }
   render(projects);
+  updateConfirm(projects, info);
   for (const p of projects) { const b = $('log-' + p.id); if (b && !b.hidden) b.scrollTop = b.scrollHeight; }
   clearTimeout(timer);
-  const active = projects.some((p) => p.status === 'building' || p.status === 'queued' || p.busy);
+  const active = projects.some((p) => p.status === 'building' || p.status === 'queued' || p.busy || p.confirmSecondsLeft != null);
   timer = setTimeout(() => refresh().catch(() => {}), active ? 1500 : 8000);
 }
 
