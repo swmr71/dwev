@@ -262,6 +262,22 @@ test('メモリの枠(既定512MB): 合計が枠を超える起動は 409。管�
   assert.equal((await call('PATCH', `/api/admin/users/${fay.id}`, { memoryBudgetMb: 'x' }, ADMIN)).status, 400);
 });
 
+test('ポイント: /me に残りが出る。管理者が上限を人ごとに変えられる(不正な値は 400)', async () => {
+  const gus = makeUser(1040, 'gus');
+  const me = await (await call('GET', '/api/me', null, gus.headers)).json();
+  assert.equal(me.points.enabled, true);
+  assert.equal(me.points.cap, 2);
+  assert.equal(me.points.balance, 2);
+
+  const up = await call('PATCH', `/api/admin/users/${gus.id}`, { pointsCap: 4 }, ADMIN);
+  assert.equal(up.status, 200);
+  assert.equal((await up.json()).points.cap, 4);
+  assert.equal((await call('PATCH', `/api/admin/users/${gus.id}`, { pointsCap: -1 }, ADMIN)).status, 400);
+  assert.equal((await call('PATCH', `/api/admin/users/${gus.id}`, { pointsCap: 'abc' }, ADMIN)).status, 400);
+  const back = await call('PATCH', `/api/admin/users/${gus.id}`, { pointsCap: null }, ADMIN);
+  assert.equal((await back.json()).points.cap, 2);
+});
+
 test('malformed JSON and oversized bodies are handled', async () => {
   const r = await fetch(base + '/api/projects', { method: 'POST', headers: alice.headers, body: '{bad' });
   assert.equal(r.status, 400);

@@ -20,6 +20,7 @@ import { assertDnsConfig, dnsEnabled } from './dns.js';
 import { readLog, removeLog } from './logs.js';
 import { verifyHuman, humanCheckEnabled, KEEPALIVE_ACTION } from './humancheck.js';
 import { privateReposEnabled, installUrl, hasToken, clearToken } from './ghtoken.js';
+import { pointsEnabled, presentPoints, secondsUntilEmpty } from './points.js';
 import {
   loadUser, requireLogin, requireApproved, adminAuth, sameOriginOnly, authRouter, githubEnabled,
 } from './auth.js';
@@ -46,6 +47,7 @@ app.use('/auth', authRouter);
 
 // 公開用の表現。env の値は返さずキー名だけ返す。
 function present(p) {
+  const owner = p.user_id ? getUser(p.user_id) : null;
   let envKeys = [];
   try {
     envKeys = Object.keys(decryptJson(p.env_enc));
@@ -74,6 +76,8 @@ function present(p) {
     confirmSecondsLeft: confirmSecondsLeft(p),
     secondsToConfirm: secondsToConfirm(p),
     runtimeSecondsLeft: runtimeSecondsLeft(p),
+    // このまま動かし続けたとき、ポイントが尽きるまでの秒数(尽きない・無効のときは null)
+    pointsSecondsLeft: owner && pointsEnabled() && p.status === 'running' ? secondsUntilEmpty(owner) : null,
     queuePosition: p.status === 'queued' ? queuePosition(p.id) : null,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
@@ -87,6 +91,7 @@ function presentUser(u) {
     avatarUrl: u.avatar_url,
     status: u.status,
     limits: limitsFor(u),
+    points: presentPoints(u),
     // 上限に対して、今どれだけ使っているか
     usage: { projects: countProjects(u.id), running: userOccupied(u.id), memoryMb: userMemoryOccupied(u.id) },
   };
@@ -263,7 +268,10 @@ admin.get('/info', (_req, res) => {
     maxRuntimeHours: config.maxRuntimeHours,
     dnsAutomation: dnsEnabled(),
     githubLogin: githubEnabled(),
-    defaults: { maxProjects: config.defaultMaxProjects, maxRunning: config.defaultMaxRunning, memoryBudgetMb: config.defaultMemoryBudgetMb },
+    defaults: {
+      maxProjects: config.defaultMaxProjects, maxRunning: config.defaultMaxRunning,
+      memoryBudgetMb: config.defaultMemoryBudgetMb, pointsCap: config.points.cap,
+    },
     users: Object.fromEntries(USER_STATUSES.map((s) => [s, users.filter((u) => u.status === s).length])),
   });
 });
@@ -276,6 +284,7 @@ admin.get('/users', (_req, res) => {
       maxProjectsSetting: u.max_projects, // null = 既定値を使う
       maxRunningSetting: u.max_running,
       memoryBudgetSetting: u.memory_budget_mb,
+      pointsCapSetting: u.points_cap,
       createdAt: u.created_at,
       lastLoginAt: u.last_login_at,
     }))
@@ -302,6 +311,14 @@ admin.patch('/users/:id', async (req, res) => {
   if (b.maxProjects !== undefined) fields.max_projects = limitValue(b.maxProjects, 'maxProjects', 100);
   if (b.maxRunning !== undefined) fields.max_running = limitValue(b.maxRunning, 'maxRunning', 20);
   if (b.memoryBudgetMb !== undefined) fields.memory_budget_mb = limitValue(b.memoryBudgetMb, 'memoryBudgetMb', 16384);
+  if (b.pointsCap !== undefined) {
+    if (b.pointsCap === null || b.pointsCap === '') fields.points_cap = null;
+    else {
+      const n = Number(b.pointsCap);
+      if (!Number.isFinite(n) || n < 0 || n > 1000) throw new ValidationError('pointsCap は 0〜1000 の数にしてください');
+      fields.points_cap = n;
+    }
+  }
   const updated = updateUser(user.id, fields);
   if (updated.status !== 'approved') {
     // 承認を外した(凍結など)ら、ログインを無効にして、動いているものを止める

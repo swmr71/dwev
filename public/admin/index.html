@@ -73,7 +73,7 @@
   <section class="card" id="users-box" hidden>
     <h2>利用者</h2>
     <table>
-      <thead><tr><th>GitHub</th><th>状態</th><th>使用中</th><th>プロジェクト上限</th><th>同時起動上限</th><th>メモリ枠(MB)</th><th></th><th>最終ログイン</th></tr></thead>
+      <thead><tr><th>GitHub</th><th>状態</th><th>使用中</th><th>プロジェクト上限</th><th>同時起動上限</th><th>メモリ枠(MB)</th><th>ポイント上限</th><th></th><th>最終ログイン</th></tr></thead>
       <tbody id="users"></tbody>
     </table>
     <div class="muted" style="margin-top:8px">上限の欄を空にして保存すると、既定値に戻ります。</div>
@@ -93,7 +93,7 @@
 const $ = (id) => document.getElementById(id);
 let token = sessionStorage.getItem('devbox_admin_token') || '';
 let timer = null;
-let defaults = { maxProjects: 3, maxRunning: 1, memoryBudgetMb: 512 };
+let defaults = { maxProjects: 3, maxRunning: 1, memoryBudgetMb: 512, pointsCap: 2 };
 
 // 外部由来の文字列(GitHub のユーザー名など)を扱うので、innerHTML は使わず、必ず textContent で入れる
 function el(tag, attrs = {}, ...children) {
@@ -160,15 +160,16 @@ function renderUsers(users) {
     const mp = el('input', { class: 'num', type: 'number', min: 0, max: 100, value: u.maxProjectsSetting ?? '', placeholder: `既定 ${defaults.maxProjects}` });
     const mr = el('input', { class: 'num', type: 'number', min: 0, max: 20, value: u.maxRunningSetting ?? '', placeholder: `既定 ${defaults.maxRunning}` });
     const mb = el('input', { class: 'num', type: 'number', min: 0, max: 16384, step: 128, value: u.memoryBudgetSetting ?? '', placeholder: `既定 ${defaults.memoryBudgetMb}` });
+    const pc = el('input', { class: 'num', type: 'number', min: 0, max: 1000, step: 0.5, value: u.pointsCapSetting ?? '', placeholder: `既定 ${defaults.pointsCap}` });
     const toNum = (i) => (i.value === '' ? null : Number(i.value));
     return el('tr', {},
       el('td', {}, who(u)),
       el('td', {}, badge(u.status)),
-      el('td', {}, `${u.usage.projects} 件 / 起動 ${u.usage.running} / ${u.usage.memoryMb}MB`),
-      el('td', {}, mp), el('td', {}, mr), el('td', {}, mb),
+      el('td', {}, `${u.usage.projects} 件 / 起動 ${u.usage.running} / ${u.usage.memoryMb}MB` + (u.points && u.points.enabled ? ` / ${u.points.balance.toFixed(2)}pt` : '')),
+      el('td', {}, mp), el('td', {}, mr), el('td', {}, mb), el('td', {}, pc),
       el('td', {},
         el('div', { class: 'row' },
-          el('button', { onclick: () => act(() => api(`/users/${u.id}`, { method: 'PATCH', body: { maxProjects: toNum(mp), maxRunning: toNum(mr), memoryBudgetMb: toNum(mb) } })) }, '上限を保存'),
+          el('button', { onclick: () => act(() => api(`/users/${u.id}`, { method: 'PATCH', body: { maxProjects: toNum(mp), maxRunning: toNum(mr), memoryBudgetMb: toNum(mb), pointsCap: toNum(pc) } })) }, '上限を保存'),
           u.status !== 'approved' ? el('button', { class: 'ok', onclick: () => setStatus(u, 'approved') }, '承認') : '',
           u.status !== 'suspended' ? el('button', { class: 'danger', onclick: () => { if (confirm(`${u.login} を凍結しますか？動いているものは止まり、ログインも無効になります。`)) setStatus(u, 'suspended'); } }, '凍結') : '')),
       el('td', { class: 'muted' }, fmt(u.lastLoginAt)));

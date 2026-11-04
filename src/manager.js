@@ -10,6 +10,7 @@ import { appendLog, resetLog } from './logs.js';
 import { detectRuntime } from './runtimes.js';
 import { privateReposEnabled, installUrl, getAccessToken } from './ghtoken.js';
 import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
+import { pointsEnabled, balanceOf, pointsShortage, settleAll, regenPerHour } from './points.js';
 
 let docker = new Docker(); // /var/run/docker.sock
 // テストで Docker の代わりを差し込む
@@ -313,6 +314,8 @@ export function assertRunQuota(userId, excludeId, memoryMb = config.limits.memor
     );
   }
   const used = userMemoryOccupied(userId, excludeId);
+  const shortage = pointsShortage(user, memoryMb);
+  if (shortage) throw new QuotaError(shortage);
   if (used + memoryMb > memoryBudgetMb) {
     throw new QuotaError(
       `メモリの枠(${memoryBudgetMb}MB)を超えます。いま ${used}MB を使っていて、このプロジェクトは ${memoryMb}MB です。` +
@@ -593,6 +596,9 @@ export function stopReason(p, nowMs = Date.now()) {
   if (p.user_id) {
     const owner = getUser(p.user_id);
     if (!owner || owner.status !== 'approved') return 'アカウントが利用できない状態のため停止します';
+    if (pointsEnabled() && p.status === 'running' && balanceOf(owner) <= 0.0005) {
+      return `ポイントがなくなったため停止します(1時間に ${regenPerHour(owner).toFixed(2)} pt ずつ回復します)`;
+    }
   }
   if (config.maxRuntimeHours && p.status === 'running' && p.started_at) {
     if (nowMs - Date.parse(p.started_at) > config.maxRuntimeHours * 3600 * 1000) {
@@ -792,6 +798,7 @@ export async function enforceStops() {
   if (enforcing) return; // 前回の停止(docker stop)が長引いているときは、重ねない
   enforcing = true;
   try {
+    settleAll(); // 経過した時間ぶんの、ポイントの消費と回復
     await reapExited();
     startDueConfirms();
     for (const p of listProjects()) {

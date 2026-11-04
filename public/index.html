@@ -306,6 +306,7 @@ function showUsage(i) {
   const u = me.usage, l = me.limits;
   $('info').textContent =
     `プロジェクト ${u.projects}/${l.maxProjects} ・ 同時起動 ${u.running}/${l.maxRunning} ・ メモリ ${u.memoryMb}/${l.memoryBudgetMb}MB` +
+    (me.points && me.points.enabled ? ` ・ 🔋 ${me.points.balance.toFixed(2)}/${me.points.cap} pt` : '') +
     (i ? ` ・ 全体の稼働 ${i.active}/${i.maxRunning}` : '') +
     (i && i.maxRuntimeHours ? ` ・ 最大${i.maxRuntimeHours}時間で自動停止` : '') +
     (i && i.keepaliveMinutes ? ` ・ ${i.keepaliveMinutes}分ごとに「まだ使っていますか?」の確認` : '') +
@@ -389,6 +390,7 @@ function timersFor(p) {
     if (nextConfirmUntil === null || u < nextConfirmUntil) nextConfirmUntil = u;
   }
   if (p.runtimeSecondsLeft != null) parts.push(timerSpan('⏳ 最大稼働まで', p.runtimeSecondsLeft, 300));
+  if (p.pointsSecondsLeft != null) parts.push(timerSpan('🔋 ポイントが尽きるまで', p.pointsSecondsLeft, 300));
   return parts.length ? el('div', { class: 'timers' }, ...parts) : '';
 }
 
@@ -418,8 +420,19 @@ function setupMemory(id, value) {
   r.min = mem.minMb; r.step = mem.stepMb;
   r.max = Math.max(Math.min(mem.maxMb, budget), mem.minMb, cur);
   r.value = Math.min(Math.max(cur, mem.minMb), r.max);
-  out.textContent = `${r.value} MB`;
-  r.oninput = () => { out.textContent = `${r.value} MB`; };
+  const show = () => { out.textContent = `${r.value} MB` + pointsNote(Number(r.value)); };
+  show();
+  r.oninput = show;
+}
+
+// このメモリで動かし続けたとき、いまのポイントで、どれだけ動かせるか
+function pointsNote(mb) {
+  const pt = me?.points;
+  if (!pt || !pt.enabled) return '';
+  const net = mb / 1024 - pt.regenPerHour;
+  if (net <= 0) return '(ポイントは減りません)';
+  const min = Math.floor((pt.balance / net) * 60);
+  return `(いまのポイントで、約 ${min >= 60 ? `${Math.floor(min / 60)}時間${min % 60}分` : `${min}分`})`;
 }
 
 // ---- 設定の編集(ブランチ・ポート・メモリ・環境変数) ------------------------------

@@ -57,6 +57,12 @@ export const config = {
   // 1人が同時に使えるメモリの合計(MB)。プロジェクトごとに選んだメモリの合計が、この枠に収まる範囲で起動できる。
   // 例: 512 なら、256MB のものを2つ、または 512MB のものを1つ
   defaultMemoryBudgetMb: int(process.env.DEFAULT_MEMORY_BUDGET_MB, 512),
+  // ポイント(メモリ×時間の持ち分。1ポイント = 1GB を1時間)。上限(cap)まで貯まり、regenHours 時間で満タンに戻る。
+  // 0 なら無効。メモリを大きくするほど、使える時間が短くなる
+  points: {
+    cap: Number(process.env.DEFAULT_POINTS ?? 2) >= 0 ? Number(process.env.DEFAULT_POINTS ?? 2) : 2,
+    regenHours: Number(process.env.POINTS_REGEN_HOURS) > 0 ? Number(process.env.POINTS_REGEN_HOURS) : 24,
+  },
 
   // プレビューURL。{id} が置換される。
   // 例: "{id}-dev.clusters-prj.com" (Cloudflareの無料Universal SSLは1階層ワイルドカードのみ対応)
