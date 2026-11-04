@@ -202,10 +202,13 @@ test('メモリの枠は、人ごとに変えられて、null で既定に戻る
   assert.equal(limitsFor(updateUser(u.id, { memory_budget_mb: null })).memoryBudgetMb, 512);
 });
 
-test('validateMemory: 選べる値(256 / 512)だけ。未指定は既定', () => {
+test('validateMemory: 128〜2048MB の、64MB 刻み。未指定は既定', () => {
   assert.equal(validateMemory(undefined), 256);
   assert.equal(validateMemory(''), 256);
   assert.equal(validateMemory('512'), 512);
-  assert.throws(() => validateMemory(1024), ValidationError);
-  assert.throws(() => validateMemory(300), ValidationError);
+  assert.equal(validateMemory(640), 640);
+  assert.equal(validateMemory(2048), 2048);
+  for (const bad of [64, 100, 300, 2112, 4096, 'abc', 512.5, -256]) {
+    assert.throws(() => validateMemory(bad), ValidationError, String(bad));
+  }
 });

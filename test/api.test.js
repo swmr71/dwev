@@ -219,14 +219,16 @@ test('build-log endpoint returns empty log for a never-started project', async (
   assert.deepEqual(await r.json(), { text: '', offset: 0 });
 });
 
-test('メモリ: 256 / 512 から選べる。選んでいなければ 256。ほかの値は 400', async () => {
+test('メモリ: 128〜2048MB の64MB刻みで選べる。選んでいなければ 256。範囲外・刻み違いは 400', async () => {
   const dan = makeUser(1020, 'dan');
   const mk = async (extra) => call('POST', '/api/projects', { ...valid, name: 'm', autoStart: false, ...extra }, dan.headers);
   const def = await (await mk({})).json();
   assert.equal(def.memoryMb, 256);
   const big = await (await mk({ memoryMb: 512 })).json();
   assert.equal(big.memoryMb, 512);
-  assert.equal((await mk({ memoryMb: 1024 })).status, 400);
+  assert.equal((await (await mk({ memoryMb: 640 })).json()).memoryMb, 640);
+  assert.equal((await mk({ memoryMb: 4096 })).status, 400);
+  assert.equal((await mk({ memoryMb: 300 })).status, 400);
   assert.equal((await mk({ memoryMb: 'abc' })).status, 400);
 
   // 変えると、次の起動はビルドからになる(コンテナは、作ったときのメモリのまま)

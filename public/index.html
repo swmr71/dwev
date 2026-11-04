@@ -25,6 +25,8 @@
   input, textarea, select { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 8px 10px; font: inherit; }
   textarea { font-family: ui-monospace, Menlo, monospace; font-size: 13px; min-height: 90px; resize: vertical; }
+  input[type=range] { padding: 0; border: 0; background: none; accent-color: var(--purple); height: 28px; }
+  .mem-out { font-weight: 700; color: var(--cyan); font-variant-numeric: tabular-nums; }
   input:focus, textarea:focus, select:focus { outline: 2px solid var(--blue); border-color: transparent; }
   .row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
   @media (max-width: 640px) { .row { grid-template-columns: 1fr; } header, main { padding: 14px; } }
@@ -130,8 +132,8 @@
       <div><label for="edit-branch">ブランチ</label><input id="edit-branch"></div>
       <div><label for="edit-port">ポート(アプリが待ち受ける)</label><input id="edit-port" type="number" min="1" max="65535"></div>
     </div>
-    <label for="edit-mem" style="display:block;margin-top:12px">メモリ</label>
-    <select id="edit-mem"></select>
+    <label for="edit-mem" style="display:block;margin-top:12px">メモリ: <span class="mem-out" id="edit-mem-out"></span></label>
+    <input id="edit-mem" type="range">
     <div class="hint">落ちるときは増やしてください。メモリの合計が、あなたの枠(<span class="mem-budget"></span>)に収まる範囲で起動できます。</div>
     <label for="edit-env" style="display:block;margin-top:12px">環境変数 (1行に KEY=VALUE。改行できます)</label>
     <textarea id="edit-env" placeholder="DATABASE_URL=sqlite:///db.sqlite3&#10;SECRET_KEY=..." autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
@@ -193,8 +195,8 @@
       <div><label>ブランチ</label><input id="f-branch" value="main"></div>
       <div><label>ポート(アプリが待ち受ける)</label><input id="f-port" type="number" value="3000"></div>
     </div>
-    <label for="f-mem">メモリ</label>
-    <select id="f-mem"></select>
+    <label for="f-mem">メモリ: <span class="mem-out" id="f-mem-out"></span></label>
+    <input id="f-mem" type="range">
     <div class="hint" id="mem-hint"></div>
     <label>リポジトリURL</label>
     <input id="f-repo" placeholder="https://github.com/owner/repo">
@@ -309,13 +311,11 @@ function showUsage(i) {
     (i && i.keepaliveMinutes ? ` ・ ${i.keepaliveMinutes}分ごとに「まだ使っていますか?」の確認` : '') +
     (i && i.idleStopMinutes ? ` ・ ${i.idleStopMinutes}分間アクセスがないと自動停止` : '');
   // メモリの選択肢と、枠の説明
-  if (i && Array.isArray(i.memoryOptionsMb) && i.memoryOptionsMb.length) memOptions = i.memoryOptionsMb;
-  fillMemory($('f-mem'), Number($('f-mem').value) || (i && i.defaultMemoryMb) || memOptions[0]);
+  if (i && i.memory) mem = i.memory;
+  setupMemory('f-mem');
   document.querySelectorAll('.mem-budget').forEach((e) => { e.textContent = `${l.memoryBudgetMb}MB`; });
-  const small = memOptions[0];
-  $('mem-hint').textContent = `メモリの枠は ${l.memoryBudgetMb}MB(いま ${u.memoryMb}MB 使用中)。` +
-    `${small}MB なら ${Math.floor(l.memoryBudgetMb / small)} つまで、${memOptions[memOptions.length - 1]}MB なら ` +
-    `${Math.floor(l.memoryBudgetMb / memOptions[memOptions.length - 1])} つまで、同時に動かせます。`;
+  $('mem-hint').textContent = `あなたのメモリの枠は ${l.memoryBudgetMb}MB(いま ${u.memoryMb}MB 使用中、残り ${Math.max(l.memoryBudgetMb - u.memoryMb, 0)}MB)。` +
+    '動かすプロジェクトのメモリの合計が、この枠に収まる範囲で起動できます。';
 }
 
 let gateTimer = null;
@@ -409,11 +409,17 @@ setInterval(tickTimers, 1000);
 
 // ---- メモリの選択 ------------------------------------------------------------------
 // 選べる値は /info が返す。取れる前は、既定の2つを出しておく
-let memOptions = [256, 512];
-function fillMemory(sel, value) {
-  const cur = value ?? Number(sel.value) ?? 256;
-  sel.replaceChildren(...memOptions.map((mb) => el('option', { value: mb, selected: mb === cur }, `${mb} MB`)));
-  if (!memOptions.includes(cur)) sel.value = memOptions[0];
+let mem = { minMb: 128, maxMb: 2048, stepMb: 64, defaultMb: 256 };
+// スライダーの上限は、その人のメモリ枠まで(枠を超えるものは、起動できないので)。いまの値が、それより大きいときは、その値まで
+function setupMemory(id, value) {
+  const r = $(id), out = $(id + '-out');
+  const budget = me?.limits?.memoryBudgetMb ?? mem.maxMb;
+  const cur = value ?? (Number(r.value) || mem.defaultMb);
+  r.min = mem.minMb; r.step = mem.stepMb;
+  r.max = Math.max(Math.min(mem.maxMb, budget), mem.minMb, cur);
+  r.value = Math.min(Math.max(cur, mem.minMb), r.max);
+  out.textContent = `${r.value} MB`;
+  r.oninput = () => { out.textContent = `${r.value} MB`; };
 }
 
 // ---- 設定の編集(ブランチ・ポート・メモリ・環境変数) ------------------------------
@@ -423,7 +429,7 @@ function openEdit(p) {
   $('edit-name').textContent = p.name;
   $('edit-branch').value = p.branch;
   $('edit-port').value = p.port;
-  fillMemory($('edit-mem'), p.memoryMb);
+  setupMemory('edit-mem', p.memoryMb);
   $('edit-env').value = '';
   $('edit-keys').textContent = p.envKeys.length ? '今あるキー: ' + p.envKeys.join(', ') + '(値は表示されません)' : '環境変数は、まだありません';
   $('edit-merge').checked = true;
@@ -443,8 +449,8 @@ $('edit-save').onclick = async () => {
     const port = Number($('edit-port').value);
     if (branch !== editing.branch) body.branch = branch;
     if (port !== editing.port) body.port = port;
-    const mem = Number($('edit-mem').value);
-    if (mem !== editing.memoryMb) body.memoryMb = mem;
+    const memMb = Number($('edit-mem').value);
+    if (memMb !== editing.memoryMb) body.memoryMb = memMb;
     const text = $('edit-env').value;
     if ($('edit-wipe').checked) body.env = {};
     else if (text.trim()) { body.env = parseEnv(text); body.envMerge = $('edit-merge').checked; }
@@ -664,7 +670,7 @@ async function refresh() {
   timer = setTimeout(() => refresh().catch(() => {}), active ? 1500 : 8000);
 }
 
-fillMemory($('f-mem'), 256);
+setupMemory('f-mem', 256);
 boot();
 </script>
 </body>

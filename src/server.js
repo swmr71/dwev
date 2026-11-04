@@ -125,8 +125,10 @@ api.get('/info', ...guard, (_req, res) => {
     idleStopMinutes: config.idleStopMinutes,
     keepaliveMinutes: config.keepaliveMinutes,
     keepaliveGraceMinutes: config.keepaliveGraceMinutes,
-    memoryOptionsMb: config.limits.memoryOptionsMb,
-    defaultMemoryMb: config.limits.memoryMb,
+    memory: {
+      minMb: config.limits.memoryMinMb, maxMb: config.limits.memoryMaxMb,
+      stepMb: config.limits.memoryStepMb, defaultMb: config.limits.memoryMb,
+    },
     turnstileSiteKey: humanCheckEnabled() ? config.turnstile.siteKey : '',
   });
 });

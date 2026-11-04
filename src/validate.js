@@ -41,12 +41,13 @@ export function validatePort(port) {
   return p;
 }
 
-// 選べる値(config.limits.memoryOptionsMb)のどれか。未指定なら既定
+// 範囲(config.limits.memoryMinMb〜MaxMb)の、刻みの倍数。未指定なら既定
 export function validateMemory(v) {
   if (v === undefined || v === null || v === '') return config.limits.memoryMb;
   const n = Number(v);
-  if (!config.limits.memoryOptionsMb.includes(n)) {
-    fail(`メモリは ${config.limits.memoryOptionsMb.join(' / ')} MB から選んでください`);
+  const { memoryMinMb: min, memoryMaxMb: max, memoryStepMb: step } = config.limits;
+  if (!Number.isInteger(n) || n < min || n > max || n % step !== 0) {
+    fail(`メモリは ${min}〜${max}MB の、${step}MB 刻みで指定してください`);
   }
   return n;
 }

@@ -107,11 +107,10 @@ export const config = {
   // コンテナのリソース制限
   limits: {
     memoryMb: int(process.env.LIMIT_MEMORY_MB, 256), // プロジェクトごとの既定
-    // プロジェクトごとに選べるメモリ(MB)。既定の値は、必ず含める
-    memoryOptionsMb: [...new Set([
-      int(process.env.LIMIT_MEMORY_MB, 256),
-      ...(process.env.LIMIT_MEMORY_OPTIONS_MB || '256,512').split(',').map((s) => Number.parseInt(s, 10)).filter((n) => n >= 64),
-    ])].sort((a, b) => a - b),
+    // プロジェクトごとに選べるメモリ(MB)の範囲と刻み。実際に選べるのは、この範囲かつ、その人のメモリ枠まで
+    memoryMinMb: int(process.env.LIMIT_MEMORY_MIN_MB, 128),
+    memoryMaxMb: int(process.env.LIMIT_MEMORY_MAX_MB, 2048),
+    memoryStepMb: int(process.env.LIMIT_MEMORY_STEP_MB, 64),
     cpus: Number(process.env.LIMIT_CPUS) > 0 ? Number(process.env.LIMIT_CPUS) : 0.5,
     pids: int(process.env.LIMIT_PIDS, 128),
     // サーバー全体のプロジェクト数の上限(利用者ごとの上限とは別)
