@@ -8,11 +8,12 @@ import {
   getUser, listUsers, updateUser, limitsFor, deleteUserSessions, purgeExpiredSessions, USER_STATUSES,
 } from './db.js';
 import {
-  ValidationError, validateName, validateRepoUrl, validateBranch, validatePort, validateEnv,
+  ValidationError, validateName, validateRepoUrl, validateBranch, validatePort, validateEnv, validateMemory,
 } from './validate.js';
 import {
   startProject, stopProject, deleteProjectResources, runtimeLogs, reconcile, dockerPing, previewUrl, isBusy,
-  drainQueue, queuePosition, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, stopUserProjects,
+  drainQueue, queuePosition, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, userMemoryOccupied, projectMemoryMb,
+  stopUserProjects,
   confirmSecondsLeft, secondsToConfirm, runtimeSecondsLeft, acknowledgeConfirm, ConfirmError, canResume,
 } from './manager.js';
 import { assertDnsConfig, dnsEnabled } from './dns.js';
@@ -57,6 +58,7 @@ function present(p) {
     repoUrl: p.repo_url,
     branch: p.branch,
     port: p.port,
+    memoryMb: projectMemoryMb(p),
     status: p.status,
     busy: isBusy(p.id),
     error: p.error,
@@ -86,7 +88,7 @@ function presentUser(u) {
     status: u.status,
     limits: limitsFor(u),
     // 上限に対して、今どれだけ使っているか
-    usage: { projects: countProjects(u.id), running: userOccupied(u.id) },
+    usage: { projects: countProjects(u.id), running: userOccupied(u.id), memoryMb: userMemoryOccupied(u.id) },
   };
 }
 
@@ -123,6 +125,8 @@ api.get('/info', ...guard, (_req, res) => {
     idleStopMinutes: config.idleStopMinutes,
     keepaliveMinutes: config.keepaliveMinutes,
     keepaliveGraceMinutes: config.keepaliveGraceMinutes,
+    memoryOptionsMb: config.limits.memoryOptionsMb,
+    defaultMemoryMb: config.limits.memoryMb,
     turnstileSiteKey: humanCheckEnabled() ? config.turnstile.siteKey : '',
   });
 });
@@ -138,6 +142,7 @@ api.post('/projects', ...guard, (req, res) => {
   const branch = validateBranch(b.branch ?? 'main');
   const port = validatePort(b.port);
   const env = validateEnv(b.env);
+  const memoryMb = validateMemory(b.memoryMb);
   const { maxProjects } = limitsFor(req.user);
   if (countProjects(req.user.id) >= maxProjects) {
     return res.status(429).json({ error: `作れるプロジェクトは ${maxProjects} 件までです。不要なものを削除してください` });
@@ -146,8 +151,8 @@ api.post('/projects', ...guard, (req, res) => {
     return res.status(429).json({ error: 'サーバー全体のプロジェクト数の上限に達しています' });
   }
   // 作ってから起動に失敗する、ということがないように、先に確認する
-  if (b.autoStart !== false) assertRunQuota(req.user.id);
-  const p = insertProject({ id: newId(), name, repoUrl, branch, port, envEnc: encryptJson(env), userId: req.user.id });
+  if (b.autoStart !== false) assertRunQuota(req.user.id, undefined, memoryMb);
+  const p = insertProject({ id: newId(), name, repoUrl, branch, port, envEnc: encryptJson(env), userId: req.user.id, memoryMb });
   if (b.autoStart !== false) startProject(p.id);
   res.status(201).json(present(getProject(p.id)));
 });
@@ -170,6 +175,7 @@ api.patch('/projects/:id', ...guard, load, (req, res) => {
   if (b.name !== undefined) fields.name = validateName(b.name);
   if (b.branch !== undefined) fields.branch = validateBranch(b.branch);
   if (b.port !== undefined) fields.port = validatePort(b.port);
+  if (b.memoryMb !== undefined) fields.memory_mb = validateMemory(b.memoryMb);
   if (b.env !== undefined) {
     let env = validateEnv(b.env);
     // envMerge: 今ある環境変数を残して、渡したものだけを追加・上書きする(値は画面に出さないので、全部を打ち直さなくてよい)
@@ -181,7 +187,7 @@ api.patch('/projects/:id', ...guard, load, (req, res) => {
     fields.env_enc = encryptJson(env);
   }
   // コンテナは作ったときの設定のままなので、変えたら次の起動はビルドからにする
-  if (b.branch !== undefined || b.port !== undefined || b.env !== undefined) fields.dirty = 1;
+  if (b.branch !== undefined || b.port !== undefined || b.env !== undefined || b.memoryMb !== undefined) fields.dirty = 1;
   res.json(present(updateProject(req.project.id, fields)));
 });
 
@@ -255,7 +261,7 @@ admin.get('/info', (_req, res) => {
     maxRuntimeHours: config.maxRuntimeHours,
     dnsAutomation: dnsEnabled(),
     githubLogin: githubEnabled(),
-    defaults: { maxProjects: config.defaultMaxProjects, maxRunning: config.defaultMaxRunning },
+    defaults: { maxProjects: config.defaultMaxProjects, maxRunning: config.defaultMaxRunning, memoryBudgetMb: config.defaultMemoryBudgetMb },
     users: Object.fromEntries(USER_STATUSES.map((s) => [s, users.filter((u) => u.status === s).length])),
   });
 });
@@ -267,6 +273,7 @@ admin.get('/users', (_req, res) => {
       githubId: u.github_id,
       maxProjectsSetting: u.max_projects, // null = 既定値を使う
       maxRunningSetting: u.max_running,
+      memoryBudgetSetting: u.memory_budget_mb,
       createdAt: u.created_at,
       lastLoginAt: u.last_login_at,
     }))
@@ -292,6 +299,7 @@ admin.patch('/users/:id', async (req, res) => {
   }
   if (b.maxProjects !== undefined) fields.max_projects = limitValue(b.maxProjects, 'maxProjects', 100);
   if (b.maxRunning !== undefined) fields.max_running = limitValue(b.maxRunning, 'maxRunning', 20);
+  if (b.memoryBudgetMb !== undefined) fields.memory_budget_mb = limitValue(b.memoryBudgetMb, 'memoryBudgetMb', 16384);
   const updated = updateUser(user.id, fields);
   if (updated.status !== 'approved') {
     // 承認を外した(凍結など)ら、ログインを無効にして、動いているものを止める

@@ -219,6 +219,47 @@ test('build-log endpoint returns empty log for a never-started project', async (
   assert.deepEqual(await r.json(), { text: '', offset: 0 });
 });
 
+test('メモリ: 256 / 512 から選べる。選んでいなければ 256。ほかの値は 400', async () => {
+  const dan = makeUser(1020, 'dan');
+  const mk = async (extra) => call('POST', '/api/projects', { ...valid, name: 'm', autoStart: false, ...extra }, dan.headers);
+  const def = await (await mk({})).json();
+  assert.equal(def.memoryMb, 256);
+  const big = await (await mk({ memoryMb: 512 })).json();
+  assert.equal(big.memoryMb, 512);
+  assert.equal((await mk({ memoryMb: 1024 })).status, 400);
+  assert.equal((await mk({ memoryMb: 'abc' })).status, 400);
+
+  // 変えると、次の起動はビルドからになる(コンテナは、作ったときのメモリのまま)
+  const patched = await call('PATCH', `/api/projects/${def.id}`, { memoryMb: 512 }, dan.headers);
+  assert.equal(patched.status, 200);
+  assert.equal((await patched.json()).memoryMb, 512);
+  assert.equal(getProject(def.id).dirty, 1);
+  assert.equal((await call('PATCH', `/api/projects/${def.id}`, { memoryMb: 999 }, dan.headers)).status, 400);
+});
+
+test('メモリの枠(既定512MB): 合計が枠を超える起動は 409。管理者が人ごとに変えられる', async () => {
+  const fay = makeUser(1030, 'fay');
+  const post = async (name, extra) => (await call('POST', '/api/projects', { ...valid, name, autoStart: false, ...extra }, fay.headers)).json();
+  const a = await post('a', { memoryMb: 512 });
+  const b = await post('b', { memoryMb: 256 });
+  await call('PATCH', `/api/admin/users/${fay.id}`, { maxRunning: 5 }, ADMIN); // 件数ではなく、メモリで止める
+  updateProject(a.id, { status: 'running' }); // 512MB で、枠を使い切っている
+
+  const r = await call('POST', `/api/projects/${b.id}/start`, null, fay.headers);
+  assert.equal(r.status, 409);
+  assert.match((await r.json()).error, /メモリの枠\(512MB\)/);
+
+  const me = await (await call('GET', '/api/me', null, fay.headers)).json();
+  assert.equal(me.limits.memoryBudgetMb, 512);
+  assert.equal(me.usage.memoryMb, 512);
+
+  // 管理者が枠を 1024MB にすると、起動できる(Docker は使わないので、キューに入るかを見る)
+  const up = await call('PATCH', `/api/admin/users/${fay.id}`, { memoryBudgetMb: 1024 }, ADMIN);
+  assert.equal((await up.json()).limits.memoryBudgetMb, 1024);
+  assert.notEqual((await call('POST', `/api/projects/${b.id}/start`, null, fay.headers)).status, 409);
+  assert.equal((await call('PATCH', `/api/admin/users/${fay.id}`, { memoryBudgetMb: 'x' }, ADMIN)).status, 400);
+});
+
 test('malformed JSON and oversized bodies are handled', async () => {
   const r = await fetch(base + '/api/projects', { method: 'POST', headers: alice.headers, body: '{bad' });
   assert.equal(r.status, 400);

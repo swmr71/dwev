@@ -255,8 +255,8 @@ async function runContainer(p) {
     },
     HostConfig: {
       NetworkMode: config.dockerNetwork,
-      Memory: config.limits.memoryMb * 1024 * 1024,
-      MemorySwap: config.limits.memoryMb * 1024 * 1024, // swap無効
+      Memory: projectMemoryMb(p) * 1024 * 1024,
+      MemorySwap: projectMemoryMb(p) * 1024 * 1024, // swap無効
       NanoCpus: Math.round(config.limits.cpus * 1e9),
       PidsLimit: config.limits.pids,
       CapDrop: ['ALL'],
@@ -291,15 +291,32 @@ const OCCUPY = new Set(['building', 'running', 'queued']);
 export const userOccupied = (userId, excludeId) =>
   listProjects(userId).filter((p) => OCCUPY.has(p.status) && p.id !== excludeId).length;
 
+// プロジェクトのメモリ(MB)。選んでいなければ既定
+export const projectMemoryMb = (p) => p.memory_mb ?? config.limits.memoryMb;
+
+// 枠を使っているものの、メモリの合計(MB)
+export const userMemoryOccupied = (userId, excludeId) =>
+  listProjects(userId)
+    .filter((p) => OCCUPY.has(p.status) && p.id !== excludeId)
+    .reduce((sum, p) => sum + projectMemoryMb(p), 0);
+
 // 持ち主のいないプロジェクト(管理者が作った古いもの)は、制限しない
-export function assertRunQuota(userId, excludeId) {
+// memoryMb: これから起動するプロジェクトのメモリ。件数の上限と、メモリの合計の枠、両方に収まる必要がある
+export function assertRunQuota(userId, excludeId, memoryMb = config.limits.memoryMb) {
   if (!userId) return;
   const user = getUser(userId);
   if (!user) return;
-  const { maxRunning } = limitsFor(user);
+  const { maxRunning, memoryBudgetMb } = limitsFor(user);
   if (userOccupied(userId, excludeId) >= maxRunning) {
     throw new QuotaError(
       `同時に起動できるのは ${maxRunning} 件までです。ほかのプロジェクトを停止してから起動してください`
+    );
+  }
+  const used = userMemoryOccupied(userId, excludeId);
+  if (used + memoryMb > memoryBudgetMb) {
+    throw new QuotaError(
+      `メモリの枠(${memoryBudgetMb}MB)を超えます。いま ${used}MB を使っていて、このプロジェクトは ${memoryMb}MB です。` +
+      'ほかのプロジェクトを停止するか、メモリを小さくしてください'
     );
   }
 }
@@ -336,7 +353,7 @@ export function startProject(id, { rebuild = false } = {}) {
   if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
   if (p.status === 'queued') return; // すでに順番待ち
   if (rebuild || p.status === 'running') updateProject(id, { dirty: 1 });
-  assertRunQuota(p.user_id, id);
+  assertRunQuota(p.user_id, id, projectMemoryMb(p));
   if (activeCount(id) >= config.maxRunning) {
     updateProject(id, { status: 'queued', error: null, queued_at: nowIso() });
     resetLog(id);
@@ -749,7 +766,7 @@ export async function reapExited() {
       try {
         const info = await docker.getContainer(containerName(p.id)).inspect();
         error = info.State?.OOMKilled
-          ? `メモリの上限(${config.limits.memoryMb}MB)を超えて、アプリが終了しました`
+          ? `メモリの上限(${projectMemoryMb(p)}MB)を超えて、アプリが終了しました。「設定編集」でメモリを増やせます`
           : `アプリが終了しました(終了コード ${info.State?.ExitCode})。実行ログを確認してください`;
       } catch (e) {
         if (e.statusCode === 404) kept = false;

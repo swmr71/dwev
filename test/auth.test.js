@@ -143,7 +143,7 @@ test('初回ログイン: 「承認待ち」で作られ、安全な属性のセ
   assert.equal(me.status, 200);
   const body = await me.json();
   assert.equal(body.status, 'pending');
-  assert.deepEqual(body.limits, { maxProjects: 3, maxRunning: 1 });
+  assert.deepEqual(body.limits, { maxProjects: 3, maxRunning: 1, memoryBudgetMb: 512 });
   const post = await fetch(base + '/api/projects', {
     method: 'POST',
     headers: { Cookie: `${SESSION_COOKIE}=${token}`, 'Content-Type': 'application/json' },

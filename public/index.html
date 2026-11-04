@@ -22,10 +22,10 @@
   main { max-width: 960px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
   label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
-  input, textarea { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  input, textarea, select { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 8px 10px; font: inherit; }
   textarea { font-family: ui-monospace, Menlo, monospace; font-size: 13px; min-height: 90px; resize: vertical; }
-  input:focus, textarea:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid var(--blue); border-color: transparent; }
   .row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
   @media (max-width: 640px) { .row { grid-template-columns: 1fr; } header, main { padding: 14px; } }
   button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
@@ -130,6 +130,9 @@
       <div><label for="edit-branch">ブランチ</label><input id="edit-branch"></div>
       <div><label for="edit-port">ポート(アプリが待ち受ける)</label><input id="edit-port" type="number" min="1" max="65535"></div>
     </div>
+    <label for="edit-mem" style="display:block;margin-top:12px">メモリ</label>
+    <select id="edit-mem"></select>
+    <div class="hint">落ちるときは増やしてください。メモリの合計が、あなたの枠(<span class="mem-budget"></span>)に収まる範囲で起動できます。</div>
     <label for="edit-env" style="display:block;margin-top:12px">環境変数 (1行に KEY=VALUE。改行できます)</label>
     <textarea id="edit-env" placeholder="DATABASE_URL=sqlite:///db.sqlite3&#10;SECRET_KEY=..." autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
     <div class="hint" id="edit-keys"></div>
@@ -190,6 +193,9 @@
       <div><label>ブランチ</label><input id="f-branch" value="main"></div>
       <div><label>ポート(アプリが待ち受ける)</label><input id="f-port" type="number" value="3000"></div>
     </div>
+    <label for="f-mem">メモリ</label>
+    <select id="f-mem"></select>
+    <div class="hint" id="mem-hint"></div>
     <label>リポジトリURL</label>
     <input id="f-repo" placeholder="https://github.com/owner/repo">
     <div class="hint" id="private-hint" hidden></div>
@@ -297,11 +303,19 @@ function setUser(u) {
 function showUsage(i) {
   const u = me.usage, l = me.limits;
   $('info').textContent =
-    `プロジェクト ${u.projects}/${l.maxProjects} ・ 同時起動 ${u.running}/${l.maxRunning}` +
+    `プロジェクト ${u.projects}/${l.maxProjects} ・ 同時起動 ${u.running}/${l.maxRunning} ・ メモリ ${u.memoryMb}/${l.memoryBudgetMb}MB` +
     (i ? ` ・ 全体の稼働 ${i.active}/${i.maxRunning}` : '') +
     (i && i.maxRuntimeHours ? ` ・ 最大${i.maxRuntimeHours}時間で自動停止` : '') +
     (i && i.keepaliveMinutes ? ` ・ ${i.keepaliveMinutes}分ごとに「まだ使っていますか?」の確認` : '') +
     (i && i.idleStopMinutes ? ` ・ ${i.idleStopMinutes}分間アクセスがないと自動停止` : '');
+  // メモリの選択肢と、枠の説明
+  if (i && Array.isArray(i.memoryOptionsMb) && i.memoryOptionsMb.length) memOptions = i.memoryOptionsMb;
+  fillMemory($('f-mem'), Number($('f-mem').value) || (i && i.defaultMemoryMb) || memOptions[0]);
+  document.querySelectorAll('.mem-budget').forEach((e) => { e.textContent = `${l.memoryBudgetMb}MB`; });
+  const small = memOptions[0];
+  $('mem-hint').textContent = `メモリの枠は ${l.memoryBudgetMb}MB(いま ${u.memoryMb}MB 使用中)。` +
+    `${small}MB なら ${Math.floor(l.memoryBudgetMb / small)} つまで、${memOptions[memOptions.length - 1]}MB なら ` +
+    `${Math.floor(l.memoryBudgetMb / memOptions[memOptions.length - 1])} つまで、同時に動かせます。`;
 }
 
 let gateTimer = null;
@@ -339,7 +353,7 @@ $('create-btn').onclick = async () => {
   try {
     const p = await api('/projects', { method: 'POST', body: {
       name: $('f-name').value, repoUrl: $('f-repo').value, branch: $('f-branch').value,
-      port: $('f-port').value, env: parseEnv($('f-env').value),
+      port: $('f-port').value, env: parseEnv($('f-env').value), memoryMb: Number($('f-mem').value),
     }});
     $('f-name').value = ''; $('f-repo').value = ''; $('f-env').value = '';
     openLogs.set(p.id, { type: 'build', offset: 0, text: '' });
@@ -393,13 +407,23 @@ function tickTimers() {
 }
 setInterval(tickTimers, 1000);
 
-// ---- 設定の編集(ブランチ・ポート・環境変数) --------------------------------------
+// ---- メモリの選択 ------------------------------------------------------------------
+// 選べる値は /info が返す。取れる前は、既定の2つを出しておく
+let memOptions = [256, 512];
+function fillMemory(sel, value) {
+  const cur = value ?? Number(sel.value) ?? 256;
+  sel.replaceChildren(...memOptions.map((mb) => el('option', { value: mb, selected: mb === cur }, `${mb} MB`)));
+  if (!memOptions.includes(cur)) sel.value = memOptions[0];
+}
+
+// ---- 設定の編集(ブランチ・ポート・メモリ・環境変数) ------------------------------
 let editing = null;
 function openEdit(p) {
   editing = p;
   $('edit-name').textContent = p.name;
   $('edit-branch').value = p.branch;
   $('edit-port').value = p.port;
+  fillMemory($('edit-mem'), p.memoryMb);
   $('edit-env').value = '';
   $('edit-keys').textContent = p.envKeys.length ? '今あるキー: ' + p.envKeys.join(', ') + '(値は表示されません)' : '環境変数は、まだありません';
   $('edit-merge').checked = true;
@@ -419,6 +443,8 @@ $('edit-save').onclick = async () => {
     const port = Number($('edit-port').value);
     if (branch !== editing.branch) body.branch = branch;
     if (port !== editing.port) body.port = port;
+    const mem = Number($('edit-mem').value);
+    if (mem !== editing.memoryMb) body.memoryMb = mem;
     const text = $('edit-env').value;
     if ($('edit-wipe').checked) body.env = {};
     else if (text.trim()) { body.env = parseEnv(text); body.envMerge = $('edit-merge').checked; }
@@ -456,7 +482,7 @@ function render(projects) {
       el('div', { class: 'proj-head' },
         el('div', {},
           el('div', { class: 'proj-name' }, p.name),
-          el('div', { class: 'meta' }, `${p.repoUrl} @ ${p.branch} : ${p.port}`),
+          el('div', { class: 'meta' }, `${p.repoUrl} @ ${p.branch} : ${p.port} ・ メモリ ${p.memoryMb}MB`),
           p.cpuMs ? el('div', { class: 'meta' }, `CPU時間 ${p.cpuMs.toLocaleString()} ms`) : '',
           timersFor(p)),
         el('span', { class: 'badge s-' + p.status }, { created: '未起動', queued: p.queuePosition ? `待機中 (${p.queuePosition}番目)` : '待機中', building: 'ビルド中', running: '実行中', stopped: '停止', failed: '失敗' }[p.status] || p.status)),
@@ -638,6 +664,7 @@ async function refresh() {
   timer = setTimeout(() => refresh().catch(() => {}), active ? 1500 : 8000);
 }
 
+fillMemory($('f-mem'), 256);
 boot();
 </script>
 </body>

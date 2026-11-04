@@ -12,7 +12,10 @@ process.env.IDLE_STOP_MINUTES = '10';
 
 const { insertProject, updateProject, getProject, newId, upsertGithubUser, updateUser, limitsFor } =
   await import('../src/db.js');
-const { startProject, assertRunQuota, userOccupied, QuotaError, stopReason } = await import('../src/manager.js');
+const { startProject, assertRunQuota, userOccupied, userMemoryOccupied, projectMemoryMb, QuotaError, stopReason } =
+  await import('../src/manager.js');
+const { validateMemory, ValidationError } = await import('../src/validate.js');
+const { config } = await import('../src/config.js');
 const { encryptJson } = await import('../src/crypto.js');
 
 const mkUser = (gid, status = 'approved') => {
@@ -29,11 +32,11 @@ const mkProject = (userId, status = 'created') => {
 
 test('既定の上限は プロジェクト3件・同時起動1件。個別に変えられ、null で既定に戻る', () => {
   const u = mkUser(1);
-  assert.deepEqual(limitsFor(u), { maxProjects: 3, maxRunning: 1 });
+  assert.deepEqual(limitsFor(u), { maxProjects: 3, maxRunning: 1, memoryBudgetMb: 512 });
   const v = updateUser(u.id, { max_projects: 7, max_running: 2 });
-  assert.deepEqual(limitsFor(v), { maxProjects: 7, maxRunning: 2 });
+  assert.deepEqual(limitsFor(v), { maxProjects: 7, maxRunning: 2, memoryBudgetMb: 512 });
   const w = updateUser(u.id, { max_projects: null, max_running: null });
-  assert.deepEqual(limitsFor(w), { maxProjects: 3, maxRunning: 1 });
+  assert.deepEqual(limitsFor(w), { maxProjects: 3, maxRunning: 1, memoryBudgetMb: 512 });
   assert.throws(() => updateUser(u.id, { status: 'root' }));
   assert.throws(() => updateUser(u.id, { id: 99 }), /unknown column/);
 });
@@ -165,4 +168,44 @@ test('既定の実行時の上限: メモリ256MB・CPU 0.5・PID 128', async ()
   assert.equal(config.limits.memoryMb, 256);
   assert.equal(config.limits.cpus, 0.5);
   assert.equal(config.limits.pids, 128);
+});
+
+test('メモリの枠: 512MB なら、256MB を2つ、または 512MB を1つ。合計が枠を超える起動は断る', () => {
+  const u = mkUser(40);
+  updateUser(u.id, { max_running: 5 }); // 件数の上限ではなく、メモリの枠で止まることを見る
+  const mk = (mb, st) => {
+    const p = mkProject(u.id, st);
+    return updateProject(p.id, { memory_mb: mb });
+  };
+  mk(256, 'running');
+  assert.equal(userMemoryOccupied(u.id), 256);
+  assert.doesNotThrow(() => assertRunQuota(u.id, undefined, 256)); // 256 + 256 = 512 は収まる
+  assert.throws(() => assertRunQuota(u.id, undefined, 512), /メモリの枠\(512MB\)/); // 256 + 512 は超える
+  mk(256, 'building');
+  assert.throws(() => assertRunQuota(u.id, undefined, 256), QuotaError); // もう 512 を使い切っている
+});
+
+test('メモリ: 選んでいなければ既定。自分自身は数えず、止まっているものは枠を使わない', () => {
+  const u = mkUser(41);
+  const p = updateProject(mkProject(u.id, 'running').id, { memory_mb: 512 });
+  assert.equal(projectMemoryMb(mkProject(u.id)), config.limits.memoryMb);
+  assert.equal(projectMemoryMb(p), 512);
+  assert.doesNotThrow(() => assertRunQuota(u.id, p.id, 512)); // 動いているものの再ビルド
+  updateProject(p.id, { status: 'stopped' });
+  assert.equal(userMemoryOccupied(u.id), 0);
+});
+
+test('メモリの枠は、人ごとに変えられて、null で既定に戻る', () => {
+  const u = mkUser(42);
+  assert.equal(limitsFor(u).memoryBudgetMb, 512);
+  assert.equal(limitsFor(updateUser(u.id, { memory_budget_mb: 1024 })).memoryBudgetMb, 1024);
+  assert.equal(limitsFor(updateUser(u.id, { memory_budget_mb: null })).memoryBudgetMb, 512);
+});
+
+test('validateMemory: 選べる値(256 / 512)だけ。未指定は既定', () => {
+  assert.equal(validateMemory(undefined), 256);
+  assert.equal(validateMemory(''), 256);
+  assert.equal(validateMemory('512'), 512);
+  assert.throws(() => validateMemory(1024), ValidationError);
+  assert.throws(() => validateMemory(300), ValidationError);
 });

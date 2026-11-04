@@ -41,7 +41,17 @@ export function validatePort(port) {
   return p;
 }
 
-const RESERVED_ENV = new Set(['PORT', 'HOST']);
+// 選べる値(config.limits.memoryOptionsMb)のどれか。未指定なら既定
+export function validateMemory(v) {
+  if (v === undefined || v === null || v === '') return config.limits.memoryMb;
+  const n = Number(v);
+  if (!config.limits.memoryOptionsMb.includes(n)) {
+    fail(`メモリは ${config.limits.memoryOptionsMb.join(' / ')} MB から選んでください`);
+  }
+  return n;
+}
+
+const RESERVED_ENV =new Set(['PORT', 'HOST']);
 
 export function validateEnv(env) {
   if (env === undefined || env === null) return {};

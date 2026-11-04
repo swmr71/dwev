@@ -46,15 +46,16 @@ db.exec(`
 // 既存DBへの列追加(待機に入った時刻・稼働開始時刻・持ち主)
 const existingCols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
 for (const col of ['queued_at TEXT', 'started_at TEXT', 'user_id INTEGER', 'last_active_at TEXT', 'cpu_ms INTEGER DEFAULT 0',
-  'keepalive_at TEXT', 'confirm_deadline_at TEXT', 'dirty INTEGER DEFAULT 0']) {
+  'keepalive_at TEXT', 'confirm_deadline_at TEXT', 'dirty INTEGER DEFAULT 0', 'memory_mb INTEGER']) {
   const name = col.split(' ')[0];
   if (!existingCols.includes(name)) db.exec(`ALTER TABLE projects ADD COLUMN ${col}`);
 }
 db.exec('CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id)');
 
 // 利用者の GitHub トークン(暗号化)。プライベートリポジトリの clone 用
-if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'gh_token_enc')) {
-  db.exec('ALTER TABLE users ADD COLUMN gh_token_enc TEXT');
+const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+for (const col of ['gh_token_enc TEXT', 'memory_budget_mb INTEGER']) {
+  if (!userCols.includes(col.split(' ')[0])) db.exec(`ALTER TABLE users ADD COLUMN ${col}`);
 }
 
 const now = () => new Date().toISOString();
@@ -81,15 +82,15 @@ export function countProjects(userId) {
 export function insertProject(p) {
   const t = now();
   db.prepare(
-    `INSERT INTO projects (id, name, repo_url, branch, env_enc, port, status, user_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)`
-  ).run(p.id, p.name, p.repoUrl, p.branch, p.envEnc, p.port, p.userId ?? null, t, t);
+    `INSERT INTO projects (id, name, repo_url, branch, env_enc, port, status, user_id, memory_mb, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?)`
+  ).run(p.id, p.name, p.repoUrl, p.branch, p.envEnc, p.port, p.userId ?? null, p.memoryMb ?? null, t, t);
   return getProject(p.id);
 }
 
 const COLUMNS = new Set([
   'name', 'branch', 'env_enc', 'port', 'status', 'container_id', 'error', 'queued_at', 'started_at', 'last_active_at', 'cpu_ms',
-  'keepalive_at', 'confirm_deadline_at', 'dirty',
+  'keepalive_at', 'confirm_deadline_at', 'dirty', 'memory_mb',
 ]);
 
 export function updateProject(id, fields) {
@@ -140,7 +141,7 @@ export function upsertGithubUser({ githubId, login, avatarUrl }) {
   return getUser(Number(r.lastInsertRowid));
 }
 
-const USER_COLUMNS = new Set(['status', 'max_projects', 'max_running', 'gh_token_enc']);
+const USER_COLUMNS = new Set(['status', 'max_projects', 'max_running', 'memory_budget_mb', 'gh_token_enc']);
 
 export function updateUser(id, fields) {
   const keys = Object.keys(fields);
@@ -156,6 +157,7 @@ export function updateUser(id, fields) {
 export const limitsFor = (user) => ({
   maxProjects: user.max_projects ?? config.defaultMaxProjects,
   maxRunning: user.max_running ?? config.defaultMaxRunning,
+  memoryBudgetMb: user.memory_budget_mb ?? config.defaultMemoryBudgetMb,
 });
 
 // ---- セッション ----------------------------------------------------------------
