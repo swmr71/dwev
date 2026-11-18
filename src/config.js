@@ -140,12 +140,13 @@ export const config = {
   composeServices: {
     enabled: process.env.COMPOSE_SERVICES === '1',
     // 使えるイメージ(公式イメージの名前だけ。registry やユーザー名つきは不可)
-    allowedImages: (process.env.SERVICE_IMAGES || 'postgres,mysql,mariadb,redis,valkey,mongo,memcached')
+    allowedImages: (process.env.SERVICE_IMAGES || 'postgres,mysql,mariadb,redis,valkey,mongo,memcached,nginx')
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
     maxServices: int(process.env.MAX_SERVICES, 3), // 1プロジェクトの補助サービス数
     memoryMb: int(process.env.SERVICE_MEMORY_MB, 256), // 補助サービス1つあたり。利用者のメモリの枠・ポイントに数える
+    smallMemoryMb: int(process.env.SERVICE_SMALL_MEMORY_MB, 64), // nginx / redis / valkey / memcached
     pids: int(process.env.SERVICE_PIDS, 256), // DB はスレッドを多く使うので、アプリより多め
     readyWaitSec: int(process.env.SERVICE_READY_WAIT_SEC, 60), // 補助サービスが応答するまで待つ秒数
   },

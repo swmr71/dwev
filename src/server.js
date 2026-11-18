@@ -12,7 +12,7 @@ import {
 } from './validate.js';
 import {
   startProject, stopProject, deleteProjectResources, runtimeLogs, reconcile, dockerPing, previewUrl, isBusy,
-  drainQueue, queuePosition, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, userMemoryOccupied, projectMemoryMb,
+  drainQueue, queuePosition, planInfo, activeCount, startReaper, QuotaError, assertRunQuota, userOccupied, userMemoryOccupied, projectMemoryMb,
   stopUserProjects,
   confirmSecondsLeft, secondsToConfirm, runtimeSecondsLeft, acknowledgeConfirm, ConfirmError, canResume,
 } from './manager.js';
@@ -62,13 +62,9 @@ function present(p) {
     port: p.port,
     memoryMb: projectMemoryMb(p),
     // 補助サービス(DB など)。メモリは、枠とポイントには、アプリの分に足して数える
-    services: (() => {
-      try {
-        return JSON.parse(p.services_json || '[]');
-      } catch {
-        return [];
-      }
-    })(),
+    services: planInfo(p).services,
+    // プレビューURLの入口が、補助サービス(nginx など)のとき { service, port }。アプリのときは null
+    entry: planInfo(p).entry,
     serviceMb: p.service_mb || 0,
     status: p.status,
     busy: isBusy(p.id),
