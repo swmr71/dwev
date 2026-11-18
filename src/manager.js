@@ -8,6 +8,7 @@ import { decryptJson } from './crypto.js';
 import { getProject, updateProject, listProjects, getUser, limitsFor } from './db.js';
 import { appendLog, resetLog } from './logs.js';
 import { detectRuntime } from './runtimes.js';
+import { loadComposePlan } from './compose.js';
 import { privateReposEnabled, installUrl, getAccessToken } from './ghtoken.js';
 import { dnsEnabled, createPreviewRecord, deletePreviewRecord, sweepOrphans } from './dns.js';
 import { pointsEnabled, balanceOf, pointsShortage, settleAll, regenPerHour } from './points.js';
@@ -231,14 +232,15 @@ async function ensureNetwork() {
   }
 }
 
-async function runContainer(p) {
+export async function runContainer(p, plan = { services: [], appEnv: {} }) {
   await ensureNetwork();
   await removeContainer(p.id);
 
   const host = previewHost(p.id);
   const userEnv = decryptJson(p.env_enc);
   // devbox 側の値を最後に置いて上書きされないようにする
-  const env = { ...userEnv, HOST: '0.0.0.0', PORT: String(p.port) };
+  // compose の environment は既定値。利用者が画面で設定したものが優先
+  const env = { ...plan.appEnv, ...userEnv, HOST: '0.0.0.0', PORT: String(p.port) };
   const router = `devbox-${p.id}`;
 
   const container = await docker.createContainer({
@@ -270,8 +272,198 @@ async function runContainer(p) {
       ...(config.dockerRuntime ? { Runtime: config.dockerRuntime } : {}),
     },
   });
+  // 補助サービスがあれば、その専用ネットワークにも入る(サービス名で届く)
+  if (plan.services.length > 0) await docker.getNetwork(projectNet(p.id)).connect({ Container: container.id });
   await container.start();
   return container.id;
+}
+
+// ---- 補助サービス(DB・キャッシュ)------------------------------------------------
+// リポジトリの docker-compose.yml にある、許可したイメージだけを、プロジェクト専用の「閉じたネットワーク」で動かす。
+//   - ネットワークは Internal(外に出られない)。アプリのコンテナだけが、devbox-net に加えて、ここにも入る
+//   - アプリからは、サービス名(例: db)で届く。ほかのプロジェクトからは届かない
+//   - コンテナには、アプリと同じ制限をかける(メモリ・PID・権限の削除)。DB が起動時に必要とする権限だけ、足す
+const sidecarName = (id, svc) => `devbox-${id}-${svc}`;
+const projectNet = (id) => `devbox-p-${id}`;
+// DB の公式イメージが、データのフォルダを整えて、権限を落として起動するために要る(これ以外は、すべて削除)
+const SIDECAR_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID'];
+// 起動が終わったかを見る(TCP で、実際に待ち受けてから「正常」になる。初期化中の一時的なサーバーでは通らない)
+const SIDECAR_HEALTH = {
+  postgres: 'pg_isready -h 127.0.0.1 -U "${POSTGRES_USER:-postgres}"',
+  mysql: 'mysqladmin ping -h 127.0.0.1 --silent',
+  mariadb: 'mariadb-admin ping -h 127.0.0.1 --silent || mysqladmin ping -h 127.0.0.1 --silent',
+  redis: 'redis-cli -h 127.0.0.1 ping',
+  valkey: 'valkey-cli -h 127.0.0.1 ping || redis-cli -h 127.0.0.1 ping',
+  mongo: 'mongosh --quiet --eval "db.adminCommand(\'ping\')" || mongo --quiet --eval "db.adminCommand(\'ping\')"',
+};
+
+const parseServices = (p) => {
+  try {
+    return JSON.parse(p.services_json || '[]');
+  } catch {
+    return [];
+  }
+};
+
+async function ensureProjectNetwork(id) {
+  try {
+    await docker.getNetwork(projectNet(id)).inspect();
+  } catch (e) {
+    if (e.statusCode !== 404) throw e;
+    // Internal: 外(インターネット・社内LAN)への経路を持たない
+    await docker.createNetwork({ Name: projectNet(id), Driver: 'bridge', Internal: true, Labels: { 'devbox.sidecar': id } });
+  }
+}
+
+async function listSidecars(id) {
+  const list = await docker.listContainers({ all: true, filters: { label: [`devbox.sidecar=${id}`] } });
+  // 絞り込みを信用しすぎず、印を確かめる
+  return list.filter((c) => c.Labels?.['devbox.sidecar'] === id);
+}
+
+async function ensureImage(ref, id) {
+  try {
+    await docker.getImage(ref).inspect();
+    return;
+  } catch (e) {
+    if (e.statusCode !== 404) throw e;
+  }
+  appendLog(id, `==> イメージを取得: ${ref}`);
+  const stream = await docker.pull(ref);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      stream.destroy?.();
+      reject(new Error(`イメージの取得が長すぎます (上限 ${config.limits.buildTimeoutSec}秒): ${ref}`));
+    }, config.limits.buildTimeoutSec * 1000);
+    docker.modem.followProgress(stream, (err) => {
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+// 起動が終わるまで待つ(正常にならなくても失敗にはしない。アプリ側の再接続に任せる)
+async function waitSidecarsReady(id, names) {
+  const deadline = Date.now() + config.composeServices.readyWaitSec * 1000;
+  for (const name of names) {
+    for (;;) {
+      let health;
+      try {
+        health = (await docker.getContainer(name).inspect()).State?.Health?.Status;
+      } catch {
+        break;
+      }
+      if (!health || health === 'healthy') break; // ヘルスチェックの無いイメージは待たない
+      if (Date.now() > deadline) {
+        appendLog(id, `==> ${name} がまだ応答しません。そのままアプリを起動します`);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
+// 補助サービスを作って起動する(前回のものは、呼ぶ前に消しておく)
+export async function startSidecars(p, plan) {
+  if (plan.services.length === 0) return;
+  await ensureProjectNetwork(p.id);
+  const net = projectNet(p.id);
+  for (const s of plan.services) {
+    await ensureImage(s.image, p.id);
+    const mem = config.composeServices.memoryMb * 1024 * 1024;
+    const health = SIDECAR_HEALTH[s.image.split(':')[0]];
+    const name = sidecarName(p.id, s.name);
+    appendLog(p.id, `==> 補助サービスを起動: ${s.name} (${s.image})`);
+    const c = await docker.createContainer({
+      name,
+      Image: s.image,
+      ...(s.command ? { Cmd: s.command } : {}),
+      Env: Object.entries(s.env).map(([k, v]) => `${k}=${v}`),
+      Labels: { 'devbox.sidecar': p.id, 'devbox.service': s.name },
+      ...(health
+        ? { Healthcheck: { Test: ['CMD-SHELL', health], Interval: 2e9, Timeout: 5e9, Retries: 60, StartPeriod: 2e9 } }
+        : {}),
+      NetworkingConfig: { EndpointsConfig: { [net]: { Aliases: [s.name] } } },
+      HostConfig: {
+        NetworkMode: net,
+        Memory: mem,
+        MemorySwap: mem, // swap無効
+        NanoCpus: Math.round(config.limits.cpus * 1e9),
+        PidsLimit: config.composeServices.pids,
+        CapDrop: ['ALL'],
+        CapAdd: SIDECAR_CAPS,
+        SecurityOpt: ['no-new-privileges:true'],
+        Privileged: false,
+        Init: true,
+        RestartPolicy: { Name: 'no' },
+        Ulimits: [{ Name: 'nofile', Soft: 4096, Hard: 4096 }],
+        LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '2' } },
+        ...(config.dockerRuntime ? { Runtime: config.dockerRuntime } : {}),
+      },
+    });
+    await c.start();
+  }
+  await waitSidecarsReady(p.id, plan.services.map((s) => sidecarName(p.id, s.name)));
+}
+
+// 止まっている補助サービスを、そのまま再開する。足りなければ 404(ビルドからやり直し)
+async function resumeSidecars(p) {
+  const want = parseServices(p);
+  if (want.length === 0) return;
+  const have = await listSidecars(p.id);
+  if (have.length < want.length) throw Object.assign(new Error('補助サービスのコンテナがありません'), { statusCode: 404 });
+  await ensureProjectNetwork(p.id);
+  for (const c of have) {
+    try {
+      await docker.getContainer(c.Id).start();
+    } catch (e) {
+      if (e.statusCode !== 304) throw e; // すでに動いている
+    }
+  }
+  await waitSidecarsReady(p.id, have.map((c) => c.Names?.[0]?.replace(/^\//, '') || c.Id));
+}
+
+// 消さずに止める(アプリを止めたあとに呼ぶ)
+async function stopSidecars(id) {
+  let list;
+  try {
+    list = await listSidecars(id);
+  } catch (e) {
+    console.warn(`[sidecar] ${id} の一覧を取れません: ${e.message}`);
+    return;
+  }
+  for (const c of list) {
+    try {
+      await docker.getContainer(c.Id).stop({ t: 5 });
+    } catch (e) {
+      if (e.statusCode !== 304 && e.statusCode !== 404) console.warn(`[sidecar] ${id} を停止できません: ${e.message}`);
+    }
+  }
+}
+
+// 補助サービスと専用ネットワークを消す(アプリのコンテナを消したあとに呼ぶ。データも消える)
+async function removeSidecars(id) {
+  let list;
+  try {
+    list = await listSidecars(id);
+  } catch (e) {
+    console.warn(`[sidecar] ${id} の一覧を取れません: ${e.message}`);
+    return;
+  }
+  if (list.length === 0) return;
+  for (const c of list) {
+    try {
+      await docker.getContainer(c.Id).remove({ force: true });
+    } catch (e) {
+      if (e.statusCode !== 404) console.warn(`[sidecar] ${id} を削除できません: ${e.message}`);
+    }
+  }
+  try {
+    await docker.getNetwork(projectNet(id)).remove();
+  } catch (e) {
+    if (e.statusCode !== 404) console.warn(`[sidecar] ${id} のネットワークを削除できません: ${e.message}`);
+  }
 }
 
 // ---- 同時稼働数の管理と待機キュー ---------------------------------------------
@@ -295,11 +487,14 @@ export const userOccupied = (userId, excludeId) =>
 // プロジェクトのメモリ(MB)。選んでいなければ既定
 export const projectMemoryMb = (p) => p.memory_mb ?? config.limits.memoryMb;
 
+// 補助サービス(DB など)も含めた、メモリ(MB)。枠とポイントには、こちらを数える
+export const totalMemoryMb = (p) => projectMemoryMb(p) + (p.service_mb || 0);
+
 // 枠を使っているものの、メモリの合計(MB)
 export const userMemoryOccupied = (userId, excludeId) =>
   listProjects(userId)
     .filter((p) => OCCUPY.has(p.status) && p.id !== excludeId)
-    .reduce((sum, p) => sum + projectMemoryMb(p), 0);
+    .reduce((sum, p) => sum + totalMemoryMb(p), 0);
 
 // 持ち主のいないプロジェクト(管理者が作った古いもの)は、制限しない
 // memoryMb: これから起動するプロジェクトのメモリ。件数の上限と、メモリの合計の枠、両方に収まる必要がある
@@ -356,7 +551,7 @@ export function startProject(id, { rebuild = false } = {}) {
   if (busy.has(id)) throw new Error('このプロジェクトは処理中です');
   if (p.status === 'queued') return; // すでに順番待ち
   if (rebuild || p.status === 'running') updateProject(id, { dirty: 1 });
-  assertRunQuota(p.user_id, id, projectMemoryMb(p));
+  assertRunQuota(p.user_id, id, totalMemoryMb(p));
   if (activeCount(id) >= config.maxRunning) {
     updateProject(id, { status: 'queued', error: null, queued_at: nowIso() });
     resetLog(id);
@@ -389,6 +584,7 @@ async function resumeContainer(p) {
       appendLog(id, `==> DNS レコードを作成: ${previewHost(id)}`);
       await createPreviewRecord(previewHost(id));
     }
+    await resumeSidecars(p); // 補助サービスを先に起動
     await docker.getContainer(containerName(id)).start();
     const info = await docker.getContainer(containerName(id)).inspect();
     updateProject(id, { status: 'running', container_id: info.Id, error: null, started_at: nowIso(), last_active_at: nowIso(),
@@ -407,6 +603,23 @@ async function resumeContainer(p) {
     await safeDeleteDns(id);
     return true;
   }
+}
+
+// リポジトリの docker-compose.yml から、補助サービスの計画を作る。メモリ(アプリ+補助サービス)が
+// その人の枠・ポイントに収まるかも、ここで確かめる(起動の依頼の時点では、中身がまだ分からないため)
+export function planServices(p, dir) {
+  const plan = loadComposePlan(dir, decryptJson(p.env_enc));
+  const serviceMb = plan.services.length * config.composeServices.memoryMb;
+  for (const n of plan.notes) appendLog(p.id, `==> compose: ${n}`);
+  if (plan.services.length > 0) {
+    appendLog(p.id, `==> 補助サービス: ${plan.services.map((s) => `${s.name} (${s.image})`).join(', ')} ・ メモリ +${serviceMb}MB`);
+  }
+  if (serviceMb > (p.service_mb || 0)) assertRunQuota(p.user_id, p.id, projectMemoryMb(p) + serviceMb);
+  updateProject(p.id, {
+    service_mb: serviceMb,
+    services_json: plan.services.length ? JSON.stringify(plan.services.map((s) => ({ name: s.name, image: s.image }))) : null,
+  });
+  return plan;
 }
 
 // ビルド→DNS作成→起動を非同期で実行 (呼び出し側は待たない)
@@ -438,14 +651,19 @@ function launch(id) {
       await acquireBuildSlot();
       slot = true;
       await cloneRepo(p, dir);
+      const plan = planServices(p, dir);
       const dockerfile = pickDockerfile(p, dir);
       await buildImage(p, dir, dockerfile);
       if (dnsEnabled()) {
         appendLog(id, `==> DNS レコードを作成: ${previewHost(id)}`);
         await createPreviewRecord(previewHost(id));
       }
+      // 前回のコンテナ・補助サービスを消してから、補助サービス → アプリの順に起動する
+      await removeContainer(id);
+      await removeSidecars(id);
+      await startSidecars(p, plan);
       appendLog(id, '==> コンテナを起動');
-      const containerId = await runContainer(p);
+      const containerId = await runContainer(p, plan);
       updateProject(id, { status: 'running', container_id: containerId, error: null, started_at: nowIso(), last_active_at: nowIso(),
         keepalive_at: nowIso(), confirm_deadline_at: null, dirty: 0 });
       appendLog(id, `==> 起動しました: ${previewUrl(id)}`);
@@ -456,6 +674,7 @@ function launch(id) {
       // 失敗したら何も動いていない状態にそろえる
       try {
         await removeContainer(id);
+        await removeSidecars(id);
       } catch {
         /* 後続の掃除に任せる */
       }
@@ -481,6 +700,7 @@ export async function stopProject(id) {
   busy.add(id);
   try {
     const kept = await stopContainer(id); // 消さずに止める(次の「起動」で、データのまま再開できる)
+    await stopSidecars(id);
     await safeDeleteDns(id);
     updateProject(id, { status: 'stopped', container_id: kept ? p.container_id : null, started_at: null, last_active_at: null, keepalive_at: null, confirm_deadline_at: null });
     lastRx.delete(id);
@@ -509,6 +729,7 @@ export async function deleteProjectResources(id) {
   busy.add(id);
   try {
     await removeContainer(id);
+    await removeSidecars(id);
     await safeDeleteDns(id);
     try {
       await docker.getImage(imageName(id)).remove({ force: true });
@@ -581,6 +802,7 @@ export async function reconcile() {
       updateProject(p.id, { status: 'stopped', container_id: existing.has(p.id) ? p.container_id : null, started_at: null, keepalive_at: null, confirm_deadline_at: null });
     } else if (p.status === 'stopped' && p.container_id && !existing.has(p.id)) {
       updateProject(p.id, { container_id: null });
+      await removeSidecars(p.id); // アプリのコンテナが無いなら、補助サービスだけ残さない
     }
   }
   await sweepDns();
@@ -718,11 +940,22 @@ export async function sweepStorage() {
     console.warn(`[sweepStorage] Docker に接続できません: ${e.message}`);
     return;
   }
+  // 補助サービス(DB)の書き込みも、同じ上限に合算する
+  const sidecarSize = new Map();
+  try {
+    const side = await docker.listContainers({ all: true, size: true, filters: { label: ['devbox.sidecar'] } });
+    for (const c of side) {
+      const sid = c.Labels?.['devbox.sidecar'];
+      if (sid) sidecarSize.set(sid, (sidecarSize.get(sid) || 0) + (c.SizeRw || 0));
+    }
+  } catch {
+    /* 取れなければ、アプリの分だけで判定する */
+  }
   for (const c of list) {
     const id = c.Labels['devbox.id'];
     const p = getProject(id);
     if (!p || busy.has(id)) continue;
-    const reason = storageVerdict(p, c.SizeRw || 0);
+    const reason = storageVerdict(p, (c.SizeRw || 0) + (sidecarSize.get(id) || 0));
     if (!reason) continue;
     try {
       appendLog(id, `==> ${reason}`);
@@ -730,6 +963,7 @@ export async function sweepStorage() {
       busy.add(id);
       try {
         await removeContainer(id);
+        await removeSidecars(id);
         updateProject(id, { container_id: null, error: reason });
       } finally {
         busy.delete(id);

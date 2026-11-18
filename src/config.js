@@ -135,6 +135,21 @@ export const config = {
     buildTimeoutSec: int(process.env.BUILD_TIMEOUT_SEC, 900),
   },
 
+  // リポジトリの docker-compose.yml にある補助サービス(DB・キャッシュ)を、プロジェクト専用の閉じたネットワークで動かす。
+  // 既定は無効。egress-firewall.sh を最新にして、README の確認をしてから、COMPOSE_SERVICES=1 にすること。
+  composeServices: {
+    enabled: process.env.COMPOSE_SERVICES === '1',
+    // 使えるイメージ(公式イメージの名前だけ。registry やユーザー名つきは不可)
+    allowedImages: (process.env.SERVICE_IMAGES || 'postgres,mysql,mariadb,redis,valkey,mongo,memcached')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    maxServices: int(process.env.MAX_SERVICES, 3), // 1プロジェクトの補助サービス数
+    memoryMb: int(process.env.SERVICE_MEMORY_MB, 256), // 補助サービス1つあたり。利用者のメモリの枠・ポイントに数える
+    pids: int(process.env.SERVICE_PIDS, 256), // DB はスレッドを多く使うので、アプリより多め
+    readyWaitSec: int(process.env.SERVICE_READY_WAIT_SEC, 60), // 補助サービスが応答するまで待つ秒数
+  },
+
   // gVisor等を使う場合: DOCKER_RUNTIME=runsc
   dockerRuntime: process.env.DOCKER_RUNTIME || undefined,
 };

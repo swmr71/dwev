@@ -40,7 +40,22 @@ done
 iptables -I INPUT -s "$SUBNET" -m comment --comment "$TAG" -j DROP
 iptables -I INPUT -s "$SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$TAG" -j ACCEPT
 
+# --- なりすまし対策 (補助サービスを使うとき) ----------------------------------
+# 補助サービス(docker-compose.yml の DB など)を使うと、アプリのコンテナは、専用の閉じたネットワーク
+# (172.30 の外のアドレス)にも入る。そのアドレスを「送信元」にして送ると、上の -s $SUBNET の遮断に
+# 当たらない。そこで、devbox-net の入口(ブリッジ)で、送信元が $SUBNET でないものを落とす。
+# ブリッジは、ゲートウェイのアドレス(172.30.0.1)から探す。devbox-net を作り直したら、再実行すること。
+GW="${SUBNET%.*.*}.0.1"
+BR=$(ip -o -4 addr show 2>/dev/null | awk -v gw="$GW/" 'index($4, gw) == 1 {print $2; exit}' || true)
+if [ -n "$BR" ]; then
+  iptables -I "$CHAIN" -i "$BR" ! -s "$SUBNET" -j DROP
+  echo "なりすまし対策を適用しました (ブリッジ: $BR)"
+else
+  echo "警告: devbox-net のブリッジが見つかりません。docker compose up のあとに、もう一度実行してください" >&2
+fi
+
 echo "適用しました。確認:"
 echo "  docker run --rm --network devbox-net alpine ping -c1 -W2 <社内LANのIP>   # → 失敗すること"
 echo "  docker run --rm --network devbox-net alpine wget -qO- -T5 https://example.com | head -c100   # → 成功すること"
 echo "  docker run --rm --network devbox-net alpine nc -zv -w3 <このVMのIP> 22   # → 失敗(timeout)すること"
+echo "  iptables -S DOCKER-USER | grep -- '! -s $SUBNET'   # → なりすまし対策のルールが1行あること"

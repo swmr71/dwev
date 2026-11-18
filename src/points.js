@@ -14,7 +14,8 @@ export const capFor = (user) => user.points_cap ?? config.points.cap;
 // 1時間あたりの回復量(ポイント)
 export const regenPerHour = (user) => capFor(user) / config.points.regenHours;
 
-const memoryGb = (p) => (p.memory_mb ?? config.limits.memoryMb) / 1024;
+// 補助サービス(DB など)のメモリも数える
+const memoryGb = (p) => ((p.memory_mb ?? config.limits.memoryMb) + (p.service_mb || 0)) / 1024;
 
 // 動いているプロジェクトのメモリの合計(GB)。この分が、1時間あたりに減るポイント
 export const burnPerHour = (userId) =>

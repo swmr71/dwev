@@ -204,6 +204,7 @@ DNS レコードは常に最大 `MAX_RUNNING` 件しか増えません。
 |---|---|
 | コンテナ | `cap-drop ALL` / `no-new-privileges` / 非特権 / メモリ256MB・CPU 0.5コア・PID数128の上限(`LIMIT_*` で変更) / swap無効 |
 | ビルド | `docker build` にもメモリ・CPU・時間の上限をかけ、実行時と同じ `devbox-net` で動かす(社内LAN・VM本体への遮断がビルド中にも効く) |
+| 補助サービス | 既定は無効。有効にしても、許可リストの公式イメージだけ・危険な項目はエラー・専用の Internal ネットワーク(上の「補助サービス」) |
 | 入力 | リポジトリは `https://<許可ホスト>/owner/repo` のみ / ブランチ・env名を厳格に検証 |
 | リソース | 利用者ごとのプロジェクト数・同時起動数の上限 / 全体の同時稼働数(超えたら順番待ち) / 同時ビルド数上限 / clone タイムアウト / リポジトリサイズ上限 / 最大稼働時間 |
 | ネットワーク | 管理APIと docker-socket-proxy はユーザーのコンテナと別ネットワーク。社内LAN・VM本体への通信は遮断 |
@@ -271,6 +272,59 @@ Node 22.5+ が必要(組み込みの `node:sqlite` を使用)。
 - **Django は、プレビューのホスト名を `ALLOWED_HOSTS` に入れる必要があります**(入れないと `DisallowedHost` で 400 になる)。
   環境変数で渡して settings で読む(例 `ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")`)のが簡単です
 - Vite の新しい版は `server.allowedHosts` に無いホストを断ります。プレビューのホスト名を許可してください
+
+## 補助サービス(docker-compose.yml の DB・キャッシュ)
+
+リポジトリに `docker-compose.yml`(`compose.yml` も可)があれば、その中の **DB・キャッシュだけ**を、アプリと一緒に動かせます。
+既定では**無効**です。有効にするには、下の「入れる前の確認」を済ませて、`.env` に `COMPOSE_SERVICES=1` を書きます。
+
+**compose を、そのまま `docker compose up` することはしません。** 他人が書いたファイルには、`privileged`・ホストのフォルダのマウント・
+`docker.sock`・`network_mode: host` が書けるからです。YAML を「データ」として読み、許可した項目だけを取り出して、devbox 自身が、
+アプリと同じ制限つきのコンテナとして作ります。
+
+| 項目 | 内容 |
+|---|---|
+| アプリ本体 | これまでと同じ。`Dockerfile`(または自動判定)で動かす。compose に `build:` が1つだけあれば、その `environment` は、アプリの環境変数の既定値になる(画面で設定したものが優先) |
+| 補助サービスになるもの | `image:` だけで `build:` が無いサービス(最大 `MAX_SERVICES`=3 個) |
+| 使えるイメージ | 公式イメージで、`SERVICE_IMAGES` にあるものだけ(既定: postgres / mysql / mariadb / redis / valkey / mongo / memcached)。registry やユーザー名つきは不可 |
+| 読む項目 | `image` / `environment` / `command` だけ。`ports` / `volumes` / `restart` / `depends_on` などは、無視して、ビルドログに注意書きを残す。**それ以外(`privileged`・`cap_add`・`network_mode`・`devices`・`user`・`entrypoint` など)は、エラー** |
+| 環境変数の `${VAR}` | 利用者がプロジェクトに設定した環境変数だけで置き換える(devbox の環境変数は見ない) |
+| つなぎ方 | アプリからは、サービス名(例: `db`)で届く。`DATABASE_URL=postgres://…@db:5432/…` のように書く |
+| ネットワーク | プロジェクトごとの専用ネットワーク(**Internal**: インターネットにも社内LANにも出られない)。ほかのプロジェクトからは届かない。ホストにポートは公開しない |
+| コンテナの制限 | 権限は全削除(DB の起動に要る5つだけ足す)/ `no-new-privileges` / メモリ `SERVICE_MEMORY_MB`(既定256MB)/ PID `SERVICE_PIDS` / swap無効 / gVisor も `DOCKER_RUNTIME` で効く |
+| メモリの枠・ポイント | 補助サービスのメモリは、アプリに足して、利用者の枠とポイントに数える。枠を超えるなら、起動時にエラー |
+| データ | これまでと同じ(停止しても残る。再ビルド・削除・`DATA_LIMIT_MB` 超過・`STOPPED_KEEP_DAYS` 経過で消える)。上限は、アプリと補助サービスの合計 |
+
+### 入れる前の確認
+
+1. **`scripts/egress-firewall.sh` を最新にして、もう一度適用する**(`devbox-egress.service` を入れているなら、`install` し直して `systemctl restart devbox-egress.service`)。
+   アプリのコンテナは、補助サービスを使うとき、専用ネットワークにも入るので、そのアドレスを送信元にして、社内LANへの遮断をすり抜ける通信を、
+   `devbox-net` の入口で落とすルールを足してあります。適用後、`iptables -S DOCKER-USER | grep -- '! -s 172.30.0.0/16'` で1行出ること。
+   `devbox-net` を作り直したときも、再実行が要ります(ブリッジの名前が変わるため)。
+2. `.env` に `COMPOSE_SERVICES=1` を書いて、`docker compose up -d devbox` で反映
+3. 試す: 次のような `docker-compose.yml` を持つリポジトリで、起動する
+   ```yaml
+   services:
+     web:
+       build: .
+       environment:
+         DATABASE_URL: postgres://postgres:pw@db:5432/app
+     db:
+       image: postgres:16
+       environment:
+         POSTGRES_PASSWORD: pw
+   ```
+4. アプリのコンテナの中から、`db` に届くこと / インターネットや社内LANに出られないことを確かめる
+   (補助サービスのコンテナの中から、外への接続が失敗すること: `docker exec devbox-<id>-db bash -c 'timeout 3 bash -c "</dev/tcp/1.1.1.1/53"'` → 失敗。
+   `docker network inspect devbox-p-<id> --format '{{.Internal}}'` → `true`)
+
+### 知っておくこと
+
+- **このコードは、Docker のない環境で、偽の Docker を使ったテストだけで確かめています。実機での確認は、上の手順で、公開の前にしてください。**
+- 補助サービスのイメージは、Docker Hub から取得します(初回は時間がかかる。`BUILD_TIMEOUT_SEC` で打ち切り)。タグを指定しなければ `latest` です
+- 補助サービスが、あとから落ちても、アプリの「実行中」は変わりません(アプリが落ちたときだけ、失敗になります)
+- compose で `build:` のサービスが複数あるリポジトリ(フロントとバックエンドを別々に動かす構成)は、まだ動かせません
+- 補助サービスには、`ports` / `volumes` を使えません。DB のデータは、コンテナの中に置かれます
 
 ## 制約・今後
 

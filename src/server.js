@@ -61,6 +61,15 @@ function present(p) {
     branch: p.branch,
     port: p.port,
     memoryMb: projectMemoryMb(p),
+    // 補助サービス(DB など)。メモリは、枠とポイントには、アプリの分に足して数える
+    services: (() => {
+      try {
+        return JSON.parse(p.services_json || '[]');
+      } catch {
+        return [];
+      }
+    })(),
+    serviceMb: p.service_mb || 0,
     status: p.status,
     busy: isBusy(p.id),
     error: p.error,
